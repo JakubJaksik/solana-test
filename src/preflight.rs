@@ -402,6 +402,27 @@ struct SummaryParams {
     slots_count: u64,
 }
 
+/// Konwertuje wei (U256) na ETH (f64). Dla kosztów gas tracimy precyzję poniżej
+/// ~0.000001 ETH — akceptowalne dla display.
+fn wei_to_eth(wei: U256) -> f64 {
+    // u128 jest safe dla sum poniżej ~3.4e38 wei — kilka rzędów ponad total supply ETH.
+    let low: u128 = wei.wrapping_to::<u128>();
+    (low as f64) / 1e18
+}
+
+/// Formatuje koszt: "X wei (Y.YYYYYY ETH[, ~$Z.ZZ])" — USD opcjonalne.
+fn fmt_cost(wei: U256, price_usd: Option<f64>) -> String {
+    let eth = wei_to_eth(wei);
+    match price_usd {
+        Some(p) => format!("{} wei ({:.9} ETH, ~${:.4})", wei, eth, eth * p),
+        None => format!("{} wei ({:.9} ETH)", wei, eth),
+    }
+}
+
+fn gwei_from_wei(wei: u128) -> f64 {
+    (wei as f64) / 1e9
+}
+
 fn print_summary(
     cfg: &Config,
     proj: &CostProjection,
@@ -415,13 +436,23 @@ fn print_summary(
         tx_per_wallet,
         slots_count,
     } = params;
+    let price = cfg.eth_price_usd;
     println!();
     println!("══════════════════════════════════════════════════════════");
     println!(" PRE-FLIGHT SUMMARY");
     println!("══════════════════════════════════════════════════════════");
     println!(" Chain: {} ({})", cfg.chain.name, chain_id);
     println!(" RPC RTT baseline (p50): {} ms", rtt_p50);
-    println!(" Current baseFee: {} wei", base_fee_wei);
+    println!(
+        " Current baseFee: {} wei ({:.6} gwei)",
+        base_fee_wei,
+        gwei_from_wei(*base_fee_wei)
+    );
+    if let Some(p) = price {
+        println!(" ETH price (config): ${:.2}", p);
+    } else {
+        println!(" ETH price: not configured (add \"eth_price_usd\" in config.json for USD)");
+    }
     println!();
     println!(" Plan:");
     println!(
@@ -441,15 +472,22 @@ fn print_summary(
     println!();
     println!(" Wallets & calibration:");
     for (i, w) in wallets_gas.iter().enumerate() {
+        println!("   {}  gas_used={:>7}", w.label, w.gas_used);
         println!(
-            "   {}  gas_used={:>7}  realistic_cost={} wei  worst_cost={} wei",
-            w.label, w.gas_used, proj.per_wallet_realistic_wei[i], proj.per_wallet_worst_wei[i]
+            "     realistic: {}",
+            fmt_cost(proj.per_wallet_realistic_wei[i], price)
+        );
+        println!(
+            "     worst:     {}",
+            fmt_cost(proj.per_wallet_worst_wei[i], price)
         );
     }
     println!();
+    println!(" Total cost (all wallets):");
     println!(
-        " Total cost: realistic={} wei, worst={} wei",
-        proj.total_realistic_wei, proj.total_worst_wei
+        "   realistic: {}",
+        fmt_cost(proj.total_realistic_wei, price)
     );
+    println!("   worst:     {}", fmt_cost(proj.total_worst_wei, price));
     println!("══════════════════════════════════════════════════════════");
 }

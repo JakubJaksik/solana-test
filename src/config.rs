@@ -25,6 +25,10 @@ pub struct Config {
     pub output: OutputConfig,
     #[serde(default)]
     pub send: SendConfig,
+    /// Opcjonalna cena ETH w USD do wyświetlania kosztów w pre-flight summary.
+    /// Nie wpływa na logikę — tylko display.
+    #[serde(default)]
+    pub eth_price_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
