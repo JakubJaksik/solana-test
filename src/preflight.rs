@@ -3,11 +3,73 @@
 
 use crate::config::Config;
 use crate::rpc::HttpRpcClient;
-use crate::wallet::Wallet;
+use crate::wallet::{TxParams, Wallet};
 use alloy::primitives::{Address, U256};
+use alloy::sol;
+use alloy::sol_types::SolCall;
 use anyhow::{Context, Result, bail};
 use std::io::{self, Write};
 use tracing::{info, warn};
+
+sol! {
+    function allowance(address owner, address spender) external view returns (uint256);
+    function approve(address spender, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
+}
+
+fn hex_encode_0x(b: &[u8]) -> String {
+    let mut s = String::with_capacity(2 + b.len() * 2);
+    s.push_str("0x");
+    for byte in b {
+        s.push_str(&format!("{:02x}", byte));
+    }
+    s
+}
+
+/// Zwraca `gasUsed` z receipt dla danej tx hash. Poll co 500 ms, timeout 60 s.
+async fn wait_for_receipt(http: &HttpRpcClient, tx_hash_hex: &str) -> Result<u64> {
+    use tokio::time::{Duration, sleep, timeout};
+    let fut = async {
+        loop {
+            let payload = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionReceipt","params":["{}"]}}"#,
+                tx_hash_hex
+            );
+            let resp = http.raw_call(&payload).await?;
+            let parsed: serde_json::Value = serde_json::from_str(&resp)?;
+            if parsed["result"].is_object() {
+                let gas_used_hex = parsed["result"]["gasUsed"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("no gasUsed in receipt"))?;
+                let gu = u64::from_str_radix(gas_used_hex.trim_start_matches("0x"), 16)?;
+                let status_hex = parsed["result"]["status"].as_str().unwrap_or("0x0");
+                if status_hex == "0x0" {
+                    return Err(anyhow::anyhow!("tx reverted on-chain"));
+                }
+                return Ok::<u64, anyhow::Error>(gu);
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
+    };
+    timeout(Duration::from_secs(60), fut)
+        .await
+        .context("receipt wait timed out after 60s")?
+}
+
+pub async fn erc20_balance(http: &HttpRpcClient, token: Address, owner: Address) -> Result<U256> {
+    let data = balanceOfCall { account: owner }.abi_encode();
+    let payload = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{{"to":"{:?}","data":"{}"}},"latest"]}}"#,
+        token,
+        hex_encode_0x(&data)
+    );
+    let resp = http.raw_call(&payload).await?;
+    let parsed: serde_json::Value = serde_json::from_str(&resp)?;
+    let hex = parsed["result"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("no balanceOf result"))?;
+    Ok(U256::from_str_radix(hex.trim_start_matches("0x"), 16)?)
+}
 
 #[derive(Debug, Clone)]
 pub struct WalletGas {
@@ -196,24 +258,128 @@ pub async fn run(
 // --- Placeholders for Task 11 ---
 
 async fn approve_tokens_if_needed(
-    _http: &HttpRpcClient,
-    _cfg: &Config,
-    _wallets: &[Wallet],
+    http: &HttpRpcClient,
+    cfg: &Config,
+    wallets: &[Wallet],
 ) -> Result<()> {
-    // TODO (Task 11): build approve calldata (`approve(router, uint256::MAX)`),
-    // sign + send per wallet per token, wait for receipts.
-    bail!("approve_tokens_if_needed not implemented; fill in Task 11");
+    let router: Address = cfg.swap.router_address.parse()?;
+    let tokens = [
+        (cfg.swap.token_a.parse::<Address>()?, "A"),
+        (cfg.swap.token_b.parse::<Address>()?, "B"),
+    ];
+    let threshold = U256::MAX / U256::from(2u64);
+
+    for w in wallets {
+        for (token_addr, token_label) in tokens {
+            // Read allowance
+            let call_data = allowanceCall {
+                owner: w.address(),
+                spender: router,
+            }
+            .abi_encode();
+            let hex_data = hex_encode_0x(&call_data);
+            let call_payload = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{{"to":"{:?}","data":"{}"}},"latest"]}}"#,
+                token_addr, hex_data
+            );
+            let resp = http.raw_call(&call_payload).await?;
+            let parsed: serde_json::Value = serde_json::from_str(&resp)?;
+            let result_hex = parsed["result"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("allowance call: no result"))?;
+            let allowance = U256::from_str_radix(result_hex.trim_start_matches("0x"), 16)?;
+
+            if allowance >= threshold {
+                info!(wallet = %w.label(), token = token_label, "allowance sufficient");
+                continue;
+            }
+
+            info!(wallet = %w.label(), token = token_label, "submitting approve");
+            let approve_data = approveCall {
+                spender: router,
+                amount: U256::MAX,
+            }
+            .abi_encode();
+            let base_fee = http.latest_base_fee().await?;
+            let tip = (cfg.gas.max_priority_fee_gwei * 1e9) as u128;
+            let max_fee = (base_fee as f64 * cfg.gas.max_fee_multiplier) as u128 + tip;
+            let nonce = w.consume_nonce();
+            let signed = w.sign_eip1559(TxParams {
+                chain_id: cfg.chain.chain_id,
+                nonce,
+                to: token_addr,
+                value: U256::ZERO,
+                data: approve_data,
+                gas_limit: 80_000,
+                max_priority_fee_per_gas: tip,
+                max_fee_per_gas: max_fee,
+            })?;
+            let raw_hex = hex_encode_0x(&signed.raw);
+            let payload = crate::rpc::build_send_payload(1, &raw_hex);
+            let outcome = http.send_raw_transaction_prepared(&payload).await?;
+            let tx_hash = match outcome {
+                crate::rpc::SendOutcome::Accepted { tx_hash } => tx_hash,
+                crate::rpc::SendOutcome::Rejected { code, message } => {
+                    bail!("approve rejected: code={} msg={}", code, message);
+                }
+            };
+            let tx_hash_hex = format!("{:?}", tx_hash);
+            wait_for_receipt(http, &tx_hash_hex)
+                .await
+                .with_context(|| {
+                    format!(
+                        "approve receipt poll (wallet={}, token={})",
+                        w.label(),
+                        token_label
+                    )
+                })?;
+            info!(wallet = %w.label(), token = token_label, tx_hash = ?tx_hash, "approve confirmed");
+        }
+    }
+    Ok(())
 }
 
 async fn perform_calibration_swap(
-    _http: &HttpRpcClient,
-    _cfg: &Config,
-    _wallet: &Wallet,
-    _router: Address,
-    _base_fee_wei: u128,
+    http: &HttpRpcClient,
+    cfg: &Config,
+    wallet: &Wallet,
+    router: Address,
+    base_fee_wei: u128,
 ) -> Result<u64> {
-    // TODO (Task 11): build swap tx, submit, poll receipt for gasUsed.
-    bail!("perform_calibration_swap not implemented; fill in Task 11");
+    use crate::swap::{PingPongState, SwapEncoder};
+    let encoder = SwapEncoder::new(&cfg.swap, wallet.address())?;
+    let token_a: Address = cfg.swap.token_a.parse()?;
+    let token_b: Address = cfg.swap.token_b.parse()?;
+    let bal_a = erc20_balance(http, token_a, wallet.address()).await?;
+    let bal_b = erc20_balance(http, token_b, wallet.address()).await?;
+    let state = PingPongState::initialize(bal_a, bal_b);
+    let dir = state.current_direction();
+
+    let data = encoder.encode(dir, 0)?;
+    let tip = (cfg.gas.max_priority_fee_gwei * 1e9) as u128;
+    let max_fee = (base_fee_wei as f64 * cfg.gas.max_fee_multiplier) as u128 + tip;
+    let nonce = wallet.consume_nonce();
+    let signed = wallet.sign_eip1559(TxParams {
+        chain_id: cfg.chain.chain_id,
+        nonce,
+        to: router,
+        value: U256::ZERO,
+        data,
+        gas_limit: 250_000,
+        max_priority_fee_per_gas: tip,
+        max_fee_per_gas: max_fee,
+    })?;
+    let raw_hex = hex_encode_0x(&signed.raw);
+    let payload = crate::rpc::build_send_payload(1, &raw_hex);
+    let outcome = http.send_raw_transaction_prepared(&payload).await?;
+    let tx_hash = match outcome {
+        crate::rpc::SendOutcome::Accepted { tx_hash } => tx_hash,
+        crate::rpc::SendOutcome::Rejected { code, message } => {
+            bail!("calibration swap rejected: code={} msg={}", code, message);
+        }
+    };
+    let tx_hash_hex = format!("{:?}", tx_hash);
+    wait_for_receipt(http, &tx_hash_hex).await
 }
 
 struct SummaryParams {
