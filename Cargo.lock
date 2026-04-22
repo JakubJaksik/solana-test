@@ -4330,6 +4330,7 @@ dependencies = [
  "chrono",
  "clap",
  "core_affinity",
+ "futures-util",
  "hdrhistogram",
  "pretty_assertions",
  "reqwest 0.12.28",
