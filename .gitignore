@@ -1,0 +1,10 @@
+/target
+/runs/*
+!/runs/.gitkeep
+/config.json
+/config.local.json
+*.log
+.DS_Store
+.idea/
+.vscode/
+*.swp
