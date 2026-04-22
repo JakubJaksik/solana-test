@@ -1,0 +1,39 @@
+{
+  "chain": {
+    "name": "base",
+    "chain_id": 8453,
+    "rpc_ws": "wss://REPLACE-WITH-YOUR-RPC/ws",
+    "rpc_http": "https://REPLACE-WITH-YOUR-RPC/http"
+  },
+  "timing": {
+    "start_ms": 8500,
+    "end_ms": 11500,
+    "step_ms": 50,
+    "samples_per_wallet_per_slot": 20
+  },
+  "gas": {
+    "max_priority_fee_gwei": 0.01,
+    "max_fee_multiplier": 3.0
+  },
+  "tracking": {
+    "inclusion_lookahead_blocks": 10,
+    "abort_on_consecutive_failed_blocks": 5
+  },
+  "swap": {
+    "router_address": "0x2626664c2603336E57B271c5C0b26F421741e481",
+    "pool_fee_tier": 500,
+    "token_a": "0x4200000000000000000000000000000000000006",
+    "token_b": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "amount_in_a": "1000000000000000",
+    "amount_in_b": "3000000",
+    "slippage_bps": 300
+  },
+  "wallets": [
+    {"label": "w1", "private_key": "0xREPLACE_WITH_REAL_PRIVATE_KEY_64_HEX_CHARS____________________"},
+    {"label": "w2", "private_key": "0xREPLACE_WITH_REAL_PRIVATE_KEY_64_HEX_CHARS____________________"}
+  ],
+  "output": {
+    "dir": "./runs",
+    "stdout_report": true
+  }
+}
