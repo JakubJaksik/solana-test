@@ -88,14 +88,21 @@ fn main() -> Result<()> {
 
     main_rt.block_on(async {
         let http =
-            Arc::new(HttpRpcClient::new(&cfg.chain.rpc_http).context("HTTP RPC client init")?);
+            Arc::new(HttpRpcClient::new(&cfg.chain.rpc_http).context("read HTTP RPC client init")?);
+        // Optional dedicated send endpoint (np. sequencer.base.org dla Base).
+        // Jeśli config nie ma rpc_http_send — reuse read client.
+        let send_http: Arc<HttpRpcClient> = if cfg.chain.rpc_http_send.is_some() {
+            Arc::new(HttpRpcClient::new(cfg.chain.send_url()).context("send HTTP RPC client init")?)
+        } else {
+            http.clone()
+        };
 
         let mut wallets = Vec::with_capacity(cfg.wallets.len());
         for wc in &cfg.wallets {
             wallets.push(Wallet::from_config(wc).context("wallet load")?);
         }
 
-        let outcome = preflight::run(&cfg, &http, &wallets, cli.yes)
+        let outcome = preflight::run(&cfg, &http, &send_http, &wallets, cli.yes)
             .await
             .context("pre-flight failed")?;
 
@@ -124,6 +131,7 @@ fn main() -> Result<()> {
         let ctx = EngineContext {
             cfg: cfg.clone(),
             http,
+            send_http,
             wallets: Arc::new(wallets),
             encoders: Arc::new(encoders),
             schedule,

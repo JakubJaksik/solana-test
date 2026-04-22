@@ -74,7 +74,11 @@ impl AbortTracker {
 /// Shared state passed into [`run`]. Built by the CLI after preflight.
 pub struct EngineContext {
     pub cfg: Arc<Config>,
+    /// HTTP client do read calls (chain_id, balance, block, receipts, etc.)
     pub http: Arc<HttpRpcClient>,
+    /// HTTP client do eth_sendRawTransaction. Może być === http, albo dedykowany
+    /// endpoint typu sequencer.base.org dla niższej latency send path.
+    pub send_http: Arc<HttpRpcClient>,
     pub wallets: Arc<Vec<Wallet>>,
     pub encoders: Arc<Vec<(String, SwapEncoder, PingPongState)>>,
     pub schedule: Arc<Schedule>,
@@ -370,13 +374,13 @@ pub async fn run(ctx: EngineContext) -> Result<()> {
 
                 // Spawn per-wallet timed send tasks.
                 for s in scheduled {
-                    let http = ctx.http.clone();
+                    let send_http = ctx.send_http.clone();
                     let tx = send_result_tx.clone();
                     let spin_window = Duration::from_micros(ctx.cfg.send.resolved_spin_window_us());
                     send_set.spawn(async move {
                         hybrid_sleep_until_with_window(s.target_instant, spin_window).await;
                         let t_pre = Instant::now();
-                        let outcome_res = http.send_raw_transaction_prepared(&s.payload).await;
+                        let outcome_res = send_http.send_raw_transaction_prepared(&s.payload).await;
                         let t_post = Instant::now();
                         let (resolved_outcome, rtt_us) = match outcome_res {
                             Ok(o) => (o, (t_post - t_pre).as_micros() as u64),

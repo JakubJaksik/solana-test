@@ -33,6 +33,19 @@ pub struct ChainConfig {
     pub chain_id: u64,
     pub rpc_ws: String,
     pub rpc_http: String,
+    /// Optional write-only endpoint (np. sequencer.base.org) używany tylko
+    /// dla eth_sendRawTransaction. Jeśli pominięty, wszystko idzie do rpc_http.
+    #[serde(default)]
+    pub rpc_http_send: Option<String>,
+}
+
+impl ChainConfig {
+    /// Zwraca URL do użycia dla eth_sendRawTransaction.
+    /// Prefer rpc_http_send (dedykowany send endpoint, np. sequencer),
+    /// fallback do rpc_http.
+    pub fn send_url(&self) -> &str {
+        self.rpc_http_send.as_deref().unwrap_or(&self.rpc_http)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
