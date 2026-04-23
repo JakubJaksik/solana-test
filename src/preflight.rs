@@ -216,26 +216,31 @@ pub async fn run(
         tx_per_wallet,
     );
 
-    // Balance check
+    // Balance check — zbieramy wyniki per wallet BEZ bail, żeby print_summary
+    // zobaczył pełny obraz i user widział kwoty nawet gdy brakuje ETH.
+    let mut wallet_balances: Vec<U256> = Vec::with_capacity(wallets.len());
+    let mut insufficient: Vec<(String, U256, U256)> = Vec::new();
     for (i, w) in wallets.iter().enumerate() {
         let bal = read_http
             .eth_get_balance(&format!("{:?}", w.address()))
             .await?;
+        wallet_balances.push(bal);
         if bal < projection.per_wallet_worst_wei[i] {
-            bail!(
-                "wallet '{}' balance {} < worst-case cost {}",
-                w.label(),
+            insufficient.push((
+                w.label().to_string(),
                 bal,
-                projection.per_wallet_worst_wei[i]
-            );
+                projection.per_wallet_worst_wei[i],
+            ));
         }
     }
 
-    // 6. User confirmation
+    // 6. Summary zawsze pokazujemy — z info o balanse i potencjalnym deficycie.
     print_summary(
         cfg,
         &projection,
         &wallets_gas,
+        &wallet_balances,
+        &insufficient,
         &SummaryParams {
             chain_id,
             rtt_p50,
@@ -244,6 +249,20 @@ pub async fn run(
             slots_count,
         },
     );
+
+    // Jeśli którykolwiek wallet ma za mało — bail (z zachowanym summary powyżej).
+    if !insufficient.is_empty() {
+        let joined = insufficient
+            .iter()
+            .map(|(l, b, w)| format!("  - {}: balance={} wei, need={} wei", l, b, w))
+            .collect::<Vec<_>>()
+            .join("\n");
+        bail!(
+            "insufficient balance for worst-case run cost:\n{}\nTop up wallet(s) or zmniejsz run (mniej slotów/sampli).",
+            joined
+        );
+    }
+
     if !skip_prompt {
         print!("\n Proceed? [y/N] ");
         io::stdout().flush().ok();
@@ -427,6 +446,8 @@ fn print_summary(
     cfg: &Config,
     proj: &CostProjection,
     wallets_gas: &[WalletGas],
+    wallet_balances: &[U256],
+    insufficient: &[(String, U256, U256)],
     params: &SummaryParams,
 ) {
     let SummaryParams {
@@ -472,7 +493,15 @@ fn print_summary(
     println!();
     println!(" Wallets & calibration:");
     for (i, w) in wallets_gas.iter().enumerate() {
-        println!("   {}  gas_used={:>7}", w.label, w.gas_used);
+        let bal = wallet_balances.get(i).copied().unwrap_or(U256::ZERO);
+        let worst = proj.per_wallet_worst_wei[i];
+        let marker = if bal < worst {
+            "  ⚠ INSUFFICIENT"
+        } else {
+            ""
+        };
+        println!("   {}  gas_used={:>7}{}", w.label, w.gas_used, marker);
+        println!("     balance:   {}", fmt_cost(bal, price));
         println!(
             "     realistic: {}",
             fmt_cost(proj.per_wallet_realistic_wei[i], price)
@@ -481,6 +510,10 @@ fn print_summary(
             "     worst:     {}",
             fmt_cost(proj.per_wallet_worst_wei[i], price)
         );
+        if bal < worst {
+            let deficit = worst - bal;
+            println!("     deficit:   {} (worst-case)", fmt_cost(deficit, price));
+        }
     }
     println!();
     println!(" Total cost (all wallets):");
@@ -489,5 +522,16 @@ fn print_summary(
         fmt_cost(proj.total_realistic_wei, price)
     );
     println!("   worst:     {}", fmt_cost(proj.total_worst_wei, price));
+    if !insufficient.is_empty() {
+        println!();
+        println!(
+            " ⚠ INSUFFICIENT BALANCE — {} wallet(s) nie zmieszczą worst-case:",
+            insufficient.len()
+        );
+        for (label, bal, worst) in insufficient {
+            let deficit = *worst - *bal;
+            println!("   - {}: brakuje {}", label, fmt_cost(deficit, price));
+        }
+    }
     println!("══════════════════════════════════════════════════════════");
 }
