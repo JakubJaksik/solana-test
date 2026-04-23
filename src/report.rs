@@ -94,29 +94,52 @@ impl SlotAggregator {
         }
     }
 
+    /// Ingestuje rekord tx. Engine emituje DWA rekordy per tx:
+    /// - `Pending` zaraz po udanym send (lub `SendError` jeśli RPC odrzucił)
+    /// - `Target/Late/Dropped` po klasyfikacji przez tracker
+    ///
+    /// Żeby uniknąć podwójnego liczenia:
+    /// - `sent` + timing histograms inkrementowane TYLKO na Pending/SendError
+    /// - `included_target/late/dropped` inkrementowane TYLKO na rezolwowanych
     pub fn ingest(&mut self, rec: &TxRecord) {
         let s = self.slots.entry(rec.slot_ms).or_insert(SlotStats {
             slot_ms: rec.slot_ms,
             ..Default::default()
         });
-        s.sent += 1;
         match &rec.inclusion {
+            InclusionKind::Pending => {
+                // Initial send attempt — policz sent + timing
+                s.sent += 1;
+                let wake_h = self
+                    .wake_hists
+                    .entry(rec.slot_ms)
+                    .or_insert_with(|| Histogram::new(3).unwrap());
+                let rtt_h = self
+                    .rtt_hists
+                    .entry(rec.slot_ms)
+                    .or_insert_with(|| Histogram::new(3).unwrap());
+                let _ = wake_h.record(rec.wake_jitter_us);
+                let _ = rtt_h.record(rec.rpc_rtt_us);
+            }
+            InclusionKind::SendError => {
+                // RPC odrzucił — jedyny rekord dla tej tx
+                s.sent += 1;
+                s.errors += 1;
+                let wake_h = self
+                    .wake_hists
+                    .entry(rec.slot_ms)
+                    .or_insert_with(|| Histogram::new(3).unwrap());
+                let rtt_h = self
+                    .rtt_hists
+                    .entry(rec.slot_ms)
+                    .or_insert_with(|| Histogram::new(3).unwrap());
+                let _ = wake_h.record(rec.wake_jitter_us);
+                let _ = rtt_h.record(rec.rpc_rtt_us);
+            }
             InclusionKind::Target => s.included_target += 1,
             InclusionKind::Late(_) => s.included_late += 1,
             InclusionKind::Dropped => s.dropped += 1,
-            InclusionKind::Pending => {}
-            InclusionKind::SendError => s.errors += 1,
         }
-        let wake_h = self
-            .wake_hists
-            .entry(rec.slot_ms)
-            .or_insert_with(|| Histogram::new(3).unwrap());
-        let rtt_h = self
-            .rtt_hists
-            .entry(rec.slot_ms)
-            .or_insert_with(|| Histogram::new(3).unwrap());
-        let _ = wake_h.record(rec.wake_jitter_us);
-        let _ = rtt_h.record(rec.rpc_rtt_us);
     }
 
     pub fn finalize(&mut self) {

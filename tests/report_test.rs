@@ -36,14 +36,21 @@ fn jsonl_writer_serializes_records_one_per_line() {
     assert!(lines[1].contains(r#""slot_ms":8550"#));
 }
 
+/// Pomocnik odpowiadający rzeczywistemu flow'owi engine'a: Pending po send, potem Resolved.
+fn ingest_tx(agg: &mut SlotAggregator, slot: u64, final_kind: InclusionKind) {
+    agg.ingest(&rec(slot, InclusionKind::Pending));
+    agg.ingest(&rec(slot, final_kind));
+}
+
 #[test]
 fn slot_aggregator_counts_per_slot_outcomes() {
     let mut agg = SlotAggregator::new();
-    agg.ingest(&rec(8500, InclusionKind::Target));
-    agg.ingest(&rec(8500, InclusionKind::Target));
-    agg.ingest(&rec(8500, InclusionKind::Late(1)));
-    agg.ingest(&rec(8500, InclusionKind::Dropped));
-    agg.ingest(&rec(8550, InclusionKind::Target));
+    // Slot 8500: 2× Target, 1× Late, 1× Dropped = 4 sent total
+    ingest_tx(&mut agg, 8500, InclusionKind::Target);
+    ingest_tx(&mut agg, 8500, InclusionKind::Target);
+    ingest_tx(&mut agg, 8500, InclusionKind::Late(1));
+    ingest_tx(&mut agg, 8500, InclusionKind::Dropped);
+    ingest_tx(&mut agg, 8550, InclusionKind::Target);
 
     let s1 = agg.slot(8500).unwrap();
     assert_eq!(s1.sent, 4);
@@ -57,16 +64,42 @@ fn slot_aggregator_counts_per_slot_outcomes() {
 }
 
 #[test]
+fn send_error_counts_as_sent_and_error_once() {
+    let mut agg = SlotAggregator::new();
+    // SendError to finalny stan z 1 ingestu — bez poprzedzającego Pending
+    agg.ingest(&rec(8500, InclusionKind::SendError));
+    agg.ingest(&rec(8500, InclusionKind::SendError));
+
+    let s = agg.slot(8500).unwrap();
+    assert_eq!(s.sent, 2);
+    assert_eq!(s.errors, 2);
+    assert_eq!(s.included_target, 0);
+}
+
+#[test]
+fn resolved_without_pending_does_not_inflate_sent() {
+    // Edge case: jeśli ktoś ingestuje samego Target — nie powinien zwiększyć sent
+    let mut agg = SlotAggregator::new();
+    agg.ingest(&rec(8500, InclusionKind::Target));
+    agg.ingest(&rec(8500, InclusionKind::Dropped));
+
+    let s = agg.slot(8500).unwrap();
+    assert_eq!(s.sent, 0, "Target/Dropped alone should not count as sent");
+    assert_eq!(s.included_target, 1);
+    assert_eq!(s.dropped, 1);
+}
+
+#[test]
 fn slot_aggregator_computes_cutoff_percentiles() {
     let mut agg = SlotAggregator::new();
     for _ in 0..100 {
-        agg.ingest(&rec(8500, InclusionKind::Target));
+        ingest_tx(&mut agg, 8500, InclusionKind::Target);
     }
     for _ in 0..50 {
-        agg.ingest(&rec(8550, InclusionKind::Target));
+        ingest_tx(&mut agg, 8550, InclusionKind::Target);
     }
     for _ in 0..50 {
-        agg.ingest(&rec(8550, InclusionKind::Dropped));
+        ingest_tx(&mut agg, 8550, InclusionKind::Dropped);
     }
     let c = agg.cutoffs(&[50, 90, 95, 99]);
     assert_eq!(c.get(&99).copied(), Some(8500));
@@ -79,7 +112,7 @@ fn csv_writer_emits_header_and_rows() {
     let path = dir.path().join("summary.csv");
     let mut agg = SlotAggregator::new();
     for _ in 0..10 {
-        agg.ingest(&rec(8500, InclusionKind::Target));
+        ingest_tx(&mut agg, 8500, InclusionKind::Target);
     }
     agg.finalize();
     tx_cutoff::report::write_csv(&path, &agg).unwrap();
@@ -92,7 +125,7 @@ fn csv_writer_emits_header_and_rows() {
 fn render_stdout_report_contains_key_sections() {
     let mut agg = SlotAggregator::new();
     for _ in 0..10 {
-        agg.ingest(&rec(8500, InclusionKind::Target));
+        ingest_tx(&mut agg, 8500, InclusionKind::Target);
     }
     agg.finalize();
     let out = tx_cutoff::report::render_stdout_report(&agg, &[50, 90, 95, 99]);
