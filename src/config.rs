@@ -41,6 +41,13 @@ pub struct ChainConfig {
     /// dla eth_sendRawTransaction. Jeśli pominięty, wszystko idzie do rpc_http.
     #[serde(default)]
     pub rpc_http_send: Option<String>,
+    /// Optional MEV-builder bundle endpoint (np. rpc.beaverbuild.org na ETH).
+    /// Gdy ustawiony, engine main loop używa `eth_sendBundle` z `blockNumber`
+    /// targetującym N+1 zamiast `eth_sendRawTransaction`. Preflight
+    /// (approve + calibration) nadal chodzi przez rpc_http_send/rpc_http
+    /// bo bundle wymaga konkretnego target bloku.
+    #[serde(default)]
+    pub bundle_url: Option<String>,
 }
 
 impl ChainConfig {

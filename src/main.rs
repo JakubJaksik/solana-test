@@ -96,6 +96,14 @@ fn main() -> Result<()> {
         } else {
             http.clone()
         };
+        // Optional bundle endpoint (np. rpc.beaverbuild.org na ETH). Jeśli ustawiony,
+        // engine main loop używa eth_sendBundle zamiast eth_sendRawTransaction.
+        let bundle_http: Option<Arc<HttpRpcClient>> = match &cfg.chain.bundle_url {
+            Some(url) => Some(Arc::new(
+                HttpRpcClient::new(url).context("bundle HTTP RPC client init")?,
+            )),
+            None => None,
+        };
 
         let mut wallets = Vec::with_capacity(cfg.wallets.len());
         for wc in &cfg.wallets {
@@ -132,6 +140,7 @@ fn main() -> Result<()> {
             cfg: cfg.clone(),
             http,
             send_http,
+            bundle_http,
             wallets: Arc::new(wallets),
             encoders: Arc::new(encoders),
             schedule,

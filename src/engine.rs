@@ -79,6 +79,10 @@ pub struct EngineContext {
     /// HTTP client do eth_sendRawTransaction. Może być === http, albo dedykowany
     /// endpoint typu sequencer.base.org dla niższej latency send path.
     pub send_http: Arc<HttpRpcClient>,
+    /// Optional bundle endpoint client (np. rpc.beaverbuild.org). Gdy Some,
+    /// engine main loop używa `eth_sendBundle` z blockNumber=N+1 zamiast
+    /// `eth_sendRawTransaction`. Daje twardą semantykę "target block only".
+    pub bundle_http: Option<Arc<HttpRpcClient>>,
     pub wallets: Arc<Vec<Wallet>>,
     pub encoders: Arc<Vec<(String, SwapEncoder, PingPongState)>>,
     pub schedule: Arc<Schedule>,
@@ -338,7 +342,13 @@ pub async fn run(ctx: EngineContext) -> Result<()> {
                         }
                     };
                     let raw_hex = hex_0x(&signed.raw);
-                    let payload = build_send_payload(block_index, &raw_hex);
+                    // Bundle path (Flashbots-style MEV builder) gdy config.chain.bundle_url
+                    // jest ustawiony; inaczej zwykłe eth_sendRawTransaction.
+                    let payload = if ctx.bundle_http.is_some() {
+                        crate::rpc::build_bundle_payload(block_index, &raw_hex, block_num + 1)
+                    } else {
+                        build_send_payload(block_index, &raw_hex)
+                    };
                     scheduled.push(ScheduledSend {
                         wallet_label: w.label().to_string(),
                         tx_hash: signed.tx_hash,
@@ -375,12 +385,17 @@ pub async fn run(ctx: EngineContext) -> Result<()> {
                 // Spawn per-wallet timed send tasks.
                 for s in scheduled {
                     let send_http = ctx.send_http.clone();
+                    let bundle_http = ctx.bundle_http.clone();
                     let tx = send_result_tx.clone();
                     let spin_window = Duration::from_micros(ctx.cfg.send.resolved_spin_window_us());
                     send_set.spawn(async move {
                         hybrid_sleep_until_with_window(s.target_instant, spin_window).await;
                         let t_pre = Instant::now();
-                        let outcome_res = send_http.send_raw_transaction_prepared(&s.payload).await;
+                        let outcome_res = if let Some(bh) = bundle_http {
+                            bh.send_bundle_prepared(&s.payload, s.tx_hash).await
+                        } else {
+                            send_http.send_raw_transaction_prepared(&s.payload).await
+                        };
                         let t_post = Instant::now();
                         let (resolved_outcome, rtt_us) = match outcome_res {
                             Ok(o) => (o, (t_post - t_pre).as_micros() as u64),

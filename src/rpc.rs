@@ -77,7 +77,7 @@ struct RpcResponse<T> {
     error: Option<RpcError_>,
 }
 
-// ── Payload builder ──────────────────────────────────────────────────────────
+// ── Payload builders ─────────────────────────────────────────────────────────
 
 /// Build a JSON-RPC `eth_sendRawTransaction` payload string.
 ///
@@ -86,6 +86,15 @@ pub fn build_send_payload(id: u64, raw_hex_0x: &str) -> String {
     format!(
         r#"{{"jsonrpc":"2.0","id":{},"method":"eth_sendRawTransaction","params":["{}"]}}"#,
         id, raw_hex_0x
+    )
+}
+
+/// Build a JSON-RPC `eth_sendBundle` payload dla MEV-builderów (Flashbots-style).
+/// Bundle albo wchodzi w `target_block`, albo jest droppowany — brak "late inclusion".
+pub fn build_bundle_payload(id: u64, raw_hex_0x: &str, target_block: u64) -> String {
+    format!(
+        r#"{{"jsonrpc":"2.0","id":{},"method":"eth_sendBundle","params":[{{"txs":["{}"],"blockNumber":"0x{:x}"}}]}}"#,
+        id, raw_hex_0x, target_block
     )
 }
 
@@ -135,6 +144,38 @@ impl HttpRpcClient {
         }
         Err(RpcError::Transport(
             "missing result and error in response".into(),
+        ))
+    }
+
+    /// Wyślij `eth_sendBundle` payload do builder endpointu (np. Beaver Build).
+    /// Response ma kształt `{"result":{"bundleHash":"0x..."}}` lub `{"error":...}`.
+    /// `echo_tx_hash` jest zwrócony w `SendOutcome::Accepted` (bundle nie zwraca tx_hash,
+    /// tylko bundleHash — mamy tx_hash z sygnowania).
+    pub async fn send_bundle_prepared(
+        &self,
+        payload: &str,
+        echo_tx_hash: B256,
+    ) -> Result<SendOutcome, RpcError> {
+        let text = self.raw_call(payload).await?;
+        let v: serde_json::Value = serde_json::from_str(&text)?;
+        if let Some(err) = v.get("error") {
+            let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
+            let message = err
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_string();
+            debug!(code, message = %message, "eth_sendBundle rejected");
+            return Ok(SendOutcome::Rejected { code, message });
+        }
+        if v.get("result").is_some() {
+            debug!(?echo_tx_hash, "eth_sendBundle accepted");
+            return Ok(SendOutcome::Accepted {
+                tx_hash: echo_tx_hash,
+            });
+        }
+        Err(RpcError::Transport(
+            "missing result and error in bundle response".into(),
         ))
     }
 
