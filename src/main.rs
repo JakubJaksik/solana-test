@@ -114,15 +114,30 @@ fn main() -> Result<()> {
             .await
             .context("pre-flight failed")?;
 
-        // Build encoders + ping-pong per wallet (initial dir based on current balances)
+        // Build encoders + ping-pong per wallet (initial dir based on sufficient balances)
         let mut encoders = Vec::new();
         let token_a: alloy::primitives::Address = cfg.swap.token_a.parse()?;
         let token_b: alloy::primitives::Address = cfg.swap.token_b.parse()?;
+        let amount_in_a = alloy::primitives::U256::from_str_radix(&cfg.swap.amount_in_a, 10)
+            .context("invalid swap.amount_in_a")?;
+        let amount_in_b = alloy::primitives::U256::from_str_radix(&cfg.swap.amount_in_b, 10)
+            .context("invalid swap.amount_in_b")?;
         for w in &wallets {
             let enc = SwapEncoder::new(&cfg.swap, w.address()).context("swap encoder")?;
             let bal_a = preflight::erc20_balance(&http, token_a, w.address()).await?;
             let bal_b = preflight::erc20_balance(&http, token_b, w.address()).await?;
-            let state = PingPongState::initialize(bal_a, bal_b);
+            let state = PingPongState::initialize_with_amounts(
+                bal_a, amount_in_a, bal_b, amount_in_b,
+            )
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "wallet '{}' has insufficient token balances for main loop after pre-flight:\n  \
+                     token A balance: {} (need >= {})\n  \
+                     token B balance: {} (need >= {})\n\n\
+                     Calibration swap wyczerpał tokeny. Dolej tokena A lub B żeby continue.",
+                    w.label(), bal_a, amount_in_a, bal_b, amount_in_b
+                )
+            })?;
             encoders.push((w.label().to_string(), enc, state));
         }
 

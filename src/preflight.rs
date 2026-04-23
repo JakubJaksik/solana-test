@@ -382,8 +382,30 @@ async fn perform_calibration_swap(
     let token_b: Address = cfg.swap.token_b.parse()?;
     let bal_a = erc20_balance(read_http, token_a, wallet.address()).await?;
     let bal_b = erc20_balance(read_http, token_b, wallet.address()).await?;
-    let state = PingPongState::initialize(bal_a, bal_b);
+    let amount_in_a =
+        U256::from_str_radix(&cfg.swap.amount_in_a, 10).context("invalid swap.amount_in_a")?;
+    let amount_in_b =
+        U256::from_str_radix(&cfg.swap.amount_in_b, 10).context("invalid swap.amount_in_b")?;
+    info!(
+        wallet = %wallet.label(),
+        balance_a = %bal_a,
+        balance_b = %bal_b,
+        needs_a = %amount_in_a,
+        needs_b = %amount_in_b,
+        "token balances before calibration"
+    );
+    let state = PingPongState::initialize_with_amounts(bal_a, amount_in_a, bal_b, amount_in_b)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "wallet '{}' has insufficient balance for calibration swap in EITHER direction:\n  \
+                 token A balance: {} (need >= {} for AtoB)\n  \
+                 token B balance: {} (need >= {} for BtoA)\n\n\
+                 Zwiększ balance przynajmniej jednego tokena LUB zmniejsz swap.amount_in_a/b w configu.",
+                wallet.label(), bal_a, amount_in_a, bal_b, amount_in_b
+            )
+        })?;
     let dir = state.current_direction();
+    info!(wallet = %wallet.label(), ?dir, "calibration direction chosen");
 
     let data = encoder.encode(dir, 0)?;
     let tip = (cfg.gas.max_priority_fee_gwei * 1e9) as u128;

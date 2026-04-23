@@ -47,8 +47,11 @@ pub struct PingPongState {
 }
 
 impl PingPongState {
-    /// Initialize state based on current token balances.
+    /// Initialize state based on current token balances (legacy — only checks non-zero).
     /// Starts BtoA when only token B has balance; otherwise starts AtoB.
+    ///
+    /// Preferuj `initialize_with_amounts` żeby uniknąć reverta "insufficient balance"
+    /// gdy niezerowy balance < wymagany amount_in.
     pub fn initialize(balance_a: U256, balance_b: U256) -> Self {
         let dir = if balance_a.is_zero() && !balance_b.is_zero() {
             1
@@ -58,6 +61,27 @@ impl PingPongState {
         Self {
             state: AtomicU8::new(dir),
         }
+    }
+
+    /// Initialize state sprawdzając czy balance STARCZY na planowany `amount_in`.
+    /// Preferuje AtoB jeśli wallet ma dość tokena A. Fallback BtoA jeśli tylko B starczy.
+    /// Jeśli żaden kierunek nie ma wystarczająco — zwraca None (caller powinien zabić run).
+    pub fn initialize_with_amounts(
+        balance_a: U256,
+        amount_in_a: U256,
+        balance_b: U256,
+        amount_in_b: U256,
+    ) -> Option<Self> {
+        let a_ok = balance_a >= amount_in_a;
+        let b_ok = balance_b >= amount_in_b;
+        let dir = match (a_ok, b_ok) {
+            (true, _) => 0,     // AtoB preferred
+            (false, true) => 1, // BtoA fallback
+            (false, false) => return None,
+        };
+        Some(Self {
+            state: AtomicU8::new(dir),
+        })
     }
 
     /// Return the current swap direction.
