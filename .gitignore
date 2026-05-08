@@ -10,3 +10,4 @@ config.local.json
 .vscode/
 *.swp
 .codex
+.claude/
