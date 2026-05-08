@@ -82,9 +82,13 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
     });
     let ss_rx = ss_src.start()?;
 
+    // Shutdown signal — set true after duration; correlator picks it up and exits,
+    // dropping its diff_tx → writer sees Disconnected → flushes + writes Parquet footer.
+    let shutdown = Arc::new(AtomicBool::new(false));
+
     // Spawn correlator.
     let (diff_tx, diff_rx) = bounded(args.channel_capacity);
-    let _corr_handle = spawn_corr(CorrelatorConfig {
+    let corr_handle = spawn_corr(CorrelatorConfig {
         ys_rx,
         ss_rx,
         diff_tx,
@@ -93,6 +97,7 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
         pinned_core: cores.get("corr").copied(),
         leader_lookup: leader_cache.clone(),
         diff_dropped: diff_dropped.clone(),
+        shutdown: shutdown.clone(),
     })?;
 
     // Spawn Parquet writer.
@@ -108,16 +113,21 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
     info!(?dump_path, duration = ?args.duration, "comparator running");
     std::thread::sleep(args.duration);
     info!("duration elapsed; signalling shutdown");
+    shutdown.store(true, Ordering::Relaxed);
+
+    // Order matters: correlator first (drains, then drops diff_tx), then writer
+    // (sees Disconnected, drains its channel, writes Parquet footer, returns).
+    if let Err(e) = corr_handle.join() {
+        warn!(?e, "correlator thread panicked");
+    }
+    if let Err(e) = writer_handle.join() {
+        warn!(?e, "writer thread panicked");
+    }
+
     stats_stop.store(true, Ordering::Relaxed);
     let _ = stats_handle.join();
 
-    // Note: we don't have a clean shutdown of YS/SS sources today — they spin
-    // their own threads with infinite recv loops. The writer flushes on its
-    // diff_rx disconnect, which only happens when the correlator drops diff_tx
-    // (which happens when both ys_rx/ss_rx senders close — they don't, in current
-    // design). For Task 9 baseline: process exits, OS reclaims. A cleaner
-    // shutdown is a follow-up.
-    let _ = writer_handle;
+    info!(?dump_path, "shutdown complete; Parquet finalized");
     Ok(())
 }
 

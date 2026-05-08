@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -44,6 +44,7 @@ fn matches_when_both_arrive() {
         pinned_core: None,
         leader_lookup: Arc::new(NoopLeader),
         diff_dropped: Arc::new(AtomicU64::new(0)),
+        shutdown: Arc::new(AtomicBool::new(false)),
     })
     .unwrap();
 
@@ -74,6 +75,7 @@ fn emits_single_source_after_deadline() {
         pinned_core: None,
         leader_lookup: Arc::new(NoopLeader),
         diff_dropped: Arc::new(AtomicU64::new(0)),
+        shutdown: Arc::new(AtomicBool::new(false)),
     })
     .unwrap();
 
@@ -100,6 +102,7 @@ fn hash_mismatch_when_hashes_differ() {
         pinned_core: None,
         leader_lookup: Arc::new(NoopLeader),
         diff_dropped: Arc::new(AtomicU64::new(0)),
+        shutdown: Arc::new(AtomicBool::new(false)),
     })
     .unwrap();
 
@@ -130,6 +133,7 @@ fn leader_lookup_populates_pubkey() {
         pinned_core: None,
         leader_lookup: Arc::new(move |_slot| Some(leader_pk)),
         diff_dropped: Arc::new(AtomicU64::new(0)),
+        shutdown: Arc::new(AtomicBool::new(false)),
     })
     .unwrap();
     ys_tx

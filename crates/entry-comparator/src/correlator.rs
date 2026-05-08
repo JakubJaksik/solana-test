@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -35,6 +35,9 @@ pub struct CorrelatorConfig {
     pub leader_lookup: Arc<dyn LeaderLookup>,
     /// Counter for diff_tx try_send overflow.
     pub diff_dropped: Arc<AtomicU64>,
+    /// External shutdown signal. When set true, the run loop exits, drops `diff_tx`,
+    /// and the writer downstream sees Disconnected → flushes + closes Parquet footer.
+    pub shutdown: Arc<AtomicBool>,
 }
 
 struct MatchState {
@@ -63,12 +66,16 @@ fn run_loop(cfg: CorrelatorConfig) {
         deadline,
         leader_lookup,
         diff_dropped,
+        shutdown,
         ..
     } = cfg;
     let mut map: HashMap<(u64, u32), MatchState> = HashMap::with_capacity(8192);
     let mut last_sweep = Instant::now();
 
     loop {
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
         crossbeam_channel::select! {
             recv(ys_rx) -> msg => match msg {
                 Ok(obs) => handle(&mut map, &diff_tx, anchor, obs, &*leader_lookup, &diff_dropped),
@@ -86,9 +93,10 @@ fn run_loop(cfg: CorrelatorConfig) {
             last_sweep = now;
         }
     }
-    // Final flush of any remaining state on disconnect.
+    // Final flush of any remaining state on shutdown / disconnect.
     let now = Instant::now();
     sweep(&mut map, &diff_tx, anchor, now, Duration::from_secs(0), &*leader_lookup, &diff_dropped);
+    // diff_tx drops here (end of scope) → writer's recv sees Disconnected → flushes + close.
 }
 
 fn handle(
