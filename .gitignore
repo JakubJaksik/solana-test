@@ -1,10 +1,12 @@
 /target
 /runs/*
 !/runs/.gitkeep
-/config.json
-/config.local.json
+# config files at any level (per-crate config.json with secrets)
+config.json
+config.local.json
 *.log
 .DS_Store
 .idea/
 .vscode/
 *.swp
+.codex

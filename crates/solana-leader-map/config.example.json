@@ -1,0 +1,14 @@
+{
+  "validators_app": {
+    "api_token": "PASTE-FROM-validators.app-Settings-API-Tokens",
+    "base_url": "https://www.validators.app",
+    "network": "mainnet"
+  },
+  "solana_rpc": {
+    "url": "https://api.mainnet-beta.solana.com",
+    "auth_header": null
+  },
+  "cache": {
+    "dir": "./runs"
+  }
+}
