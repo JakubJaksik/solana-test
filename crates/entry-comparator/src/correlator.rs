@@ -70,6 +70,7 @@ fn run_loop(cfg: CorrelatorConfig) {
         ..
     } = cfg;
     let mut map: HashMap<(u64, [u8; 32]), MatchState> = HashMap::with_capacity(8192);
+    let mut sweep_scratch: Vec<(u64, [u8; 32])> = Vec::with_capacity(256);
     let mut last_sweep = Instant::now();
 
     loop {
@@ -89,13 +90,13 @@ fn run_loop(cfg: CorrelatorConfig) {
         }
         let now = Instant::now();
         if now.duration_since(last_sweep) > Duration::from_millis(250) {
-            sweep(&mut map, &diff_tx, anchor, now, deadline, &*leader_lookup, &diff_dropped);
+            sweep(&mut map, &diff_tx, anchor, now, deadline, &*leader_lookup, &diff_dropped, &mut sweep_scratch);
             last_sweep = now;
         }
     }
     // Final flush of any remaining state on shutdown / disconnect.
     let now = Instant::now();
-    sweep(&mut map, &diff_tx, anchor, now, Duration::from_secs(0), &*leader_lookup, &diff_dropped);
+    sweep(&mut map, &diff_tx, anchor, now, Duration::from_secs(0), &*leader_lookup, &diff_dropped, &mut sweep_scratch);
     // diff_tx drops here (end of scope) → writer's recv sees Disconnected → flushes + close.
 }
 
@@ -131,14 +132,15 @@ fn sweep(
     deadline: Duration,
     leader: &dyn LeaderLookup,
     diff_dropped: &AtomicU64,
+    scratch: &mut Vec<(u64, [u8; 32])>,
 ) {
-    let stale: Vec<(u64, [u8; 32])> = map
+    scratch.clear();
+    scratch.extend(map
         .iter()
         .filter(|(_, st)| now.duration_since(st.inserted_at) >= deadline)
-        .map(|(k, _)| *k)
-        .collect();
-    for key in stale {
-        let st = map.remove(&key).unwrap();
+        .map(|(k, _)| *k));
+    for key in scratch.iter() {
+        let st = map.remove(key).unwrap();
         emit(st, diff_tx, anchor, leader, diff_dropped);
     }
 }

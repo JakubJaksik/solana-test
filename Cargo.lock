@@ -11273,6 +11273,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "tick-trigger-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "arrow",
+ "arrow-array",
+ "arrow-schema",
+ "bincode",
+ "bs58",
+ "chrono",
+ "clap",
+ "core_affinity",
+ "crossbeam-channel",
+ "dashmap 6.1.0",
+ "entry-sources",
+ "hostname",
+ "humantime",
+ "mimalloc",
+ "parquet",
+ "pretty_assertions",
+ "rand 0.8.6",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "solana-client",
+ "solana-compute-budget-interface",
+ "solana-sdk",
+ "solana-system-interface 3.2.0",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "time"
 version = "0.3.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"

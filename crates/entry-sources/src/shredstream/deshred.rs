@@ -39,15 +39,25 @@ fn run_loop(
     let mut tracker = FecTracker::new(counters.clone());
     // (slot) → cumulative entry index emitted so far for that slot
     let mut slot_entry_offset: HashMap<u64, u32> = HashMap::with_capacity(512);
+    let mut highest_slot: u64 = 0;
     let mut last_evict = Instant::now();
 
     while let Ok(pkt) = raw_rx.recv() {
         if let Some(ready) = tracker.ingest(pkt) {
+            if ready.slot > highest_slot {
+                highest_slot = ready.slot;
+            }
             emit_entries(ready, &mut slot_entry_offset, &obs_tx, &counters);
         }
         let now = Instant::now();
         if now.duration_since(last_evict) > Duration::from_millis(500) {
             tracker.evict_older_than(now, Duration::from_secs(2));
+            // Prune slot_entry_offset entries for slots far behind the frontier
+            // to prevent unbounded growth over a long epoch run.
+            if slot_entry_offset.len() > 2048 {
+                let cutoff = highest_slot.saturating_sub(512);
+                slot_entry_offset.retain(|s, _| *s >= cutoff);
+            }
             last_evict = now;
         }
     }

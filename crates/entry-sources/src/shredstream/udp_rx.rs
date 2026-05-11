@@ -55,7 +55,7 @@ fn run_loop(socket: UdpSocket, tx: Sender<RawShredPacket>, counters: Arc<DropCou
                 let received_at = Instant::now();
                 // Single allocation at RX→worker boundary. Hot path itself uses stack buf.
                 let packet = RawShredPacket {
-                    bytes: buf[..n].to_vec().into_boxed_slice(),
+                    bytes: buf[..n].to_vec(),
                     received_at,
                 };
                 if tx.try_send(packet).is_err() {
@@ -97,7 +97,7 @@ mod tests {
         sender.send_to(b"hello", format!("127.0.0.1:{port}")).unwrap();
 
         let pkt = rx.recv_timeout(Duration::from_secs(2)).expect("packet");
-        assert_eq!(&*pkt.bytes, b"hello");
+        assert_eq!(pkt.bytes.as_slice(), b"hello");
         assert!(pkt.received_at.elapsed() < Duration::from_secs(1));
         // Counter should be untouched on a successful recv.
         assert_eq!(counters.snapshot().ss_udp_channel_full, 0);

@@ -48,8 +48,9 @@ impl FecTracker {
 
     /// Ingest a raw shred packet. Returns `Some(FecSetReady)` if this packet completed a FEC set.
     pub fn ingest(&mut self, packet: RawShredPacket) -> Option<FecSetReady> {
+        let received_at = packet.received_at;
         // Parse the shred. If this fails, increment counter and drop.
-        let shred = match Shred::new_from_serialized_shred(packet.bytes.to_vec()) {
+        let shred = match Shred::new_from_serialized_shred(packet.bytes) {
             Ok(s) => s,
             Err(_) => {
                 self.counters.inc(&self.counters.ss_shred_parse_error);
@@ -60,7 +61,7 @@ impl FecTracker {
         let key = (shred.slot(), shred.fec_set_index());
         let state = self.sets.entry(key).or_insert_with(FecSetState::default);
         if state.first_shred_at.is_none() {
-            state.first_shred_at = Some(packet.received_at);
+            state.first_shred_at = Some(received_at);
         }
 
         match shred.shred_type() {
@@ -84,6 +85,7 @@ impl FecTracker {
             .unwrap_or(false);
 
         if data_complete {
+            let completed_at = Instant::now();   // capture FIRST, before any collect/sort work
             let st = self.sets.remove(&key).unwrap();
             let mut data_shreds: Vec<Shred> = st.data.into_values().collect();
             data_shreds.sort_by_key(|s| s.index());
@@ -93,7 +95,7 @@ impl FecTracker {
                 slot: key.0,
                 fec_set_index: key.1,
                 first_shred_at: st.first_shred_at.unwrap(),
-                completed_at: Instant::now(),
+                completed_at,
                 data_shreds,
                 coding_shreds,
             });
@@ -139,7 +141,7 @@ mod tests {
         let counters = Arc::new(DropCounters::default());
         let mut t = FecTracker::new(counters.clone());
         let bogus = RawShredPacket {
-            bytes: vec![0u8; 32].into_boxed_slice(),
+            bytes: vec![0u8; 32],
             received_at: Instant::now(),
         };
         assert!(t.ingest(bogus).is_none());

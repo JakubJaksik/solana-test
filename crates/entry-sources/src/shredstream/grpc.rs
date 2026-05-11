@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -109,15 +109,29 @@ async fn run_once(
     Ok(())
 }
 
+enum EntryCodec {
+    Bincode,
+    Wincode,
+}
+
+static CODEC: OnceLock<EntryCodec> = OnceLock::new();
+
 #[inline]
 fn decode_entries(bytes: &[u8]) -> Option<Vec<SolanaEntry>> {
-    // Try bincode first (most likely proxy uses this for the wire format),
-    // fall back to wincode (which we know works for entries reconstructed
-    // from raw shreds).
+    // Use cached codec if we have already discovered which one works.
+    if let Some(codec) = CODEC.get() {
+        return match codec {
+            EntryCodec::Bincode => bincode::deserialize::<Vec<SolanaEntry>>(bytes).ok(),
+            EntryCodec::Wincode => wincode::deserialize::<Vec<SolanaEntry>>(bytes).ok(),
+        };
+    }
+    // First call: try both, remember which worked.
     if let Ok(v) = bincode::deserialize::<Vec<SolanaEntry>>(bytes) {
+        let _ = CODEC.set(EntryCodec::Bincode);
         return Some(v);
     }
     if let Ok(v) = wincode::deserialize::<Vec<SolanaEntry>>(bytes) {
+        let _ = CODEC.set(EntryCodec::Wincode);
         return Some(v);
     }
     None

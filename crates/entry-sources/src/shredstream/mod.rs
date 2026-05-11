@@ -19,7 +19,7 @@ use crate::source::EntrySource;
 /// Created at the RX→worker boundary; ownership transferred to worker pool.
 #[derive(Debug)]
 pub struct RawShredPacket {
-    pub bytes: Box<[u8]>,
+    pub bytes: Vec<u8>,
     pub received_at: Instant,
 }
 
