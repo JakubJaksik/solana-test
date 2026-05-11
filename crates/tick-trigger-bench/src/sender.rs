@@ -40,7 +40,8 @@ pub fn spawn(cfg: SenderConfig) -> std::io::Result<std::thread::JoinHandle<()>> 
             if let Some(c) = cfg.pinned_core {
                 core_affinity::set_for_current(core_affinity::CoreId { id: c });
             }
-            let rt = tokio::runtime::Builder::new_current_thread()
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
                 .enable_all()
                 .build()
                 .expect("build tokio runtime");
@@ -53,17 +54,10 @@ async fn run_loop(cfg: SenderConfig) {
         if cfg.stop.load(Ordering::Relaxed) {
             break;
         }
-        let cmd = loop {
-            match cfg.send_queue.try_recv() {
-                Ok(c) => break c,
-                Err(crossbeam_channel::TryRecvError::Empty) => {
-                    if cfg.stop.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    std::hint::spin_loop();
-                }
-                Err(crossbeam_channel::TryRecvError::Disconnected) => return,
-            }
+        let cmd = match cfg.send_queue.recv_timeout(Duration::from_millis(100)) {
+            Ok(c) => c,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
         };
         // Guard: skip if blockhash is too old (defense in depth vs. preparer expiry tracking).
         if cmd.tx.built_at.elapsed() > cfg.blockhash_max_age {
@@ -75,42 +69,51 @@ async fn run_loop(cfg: SenderConfig) {
         // Register in pending BEFORE send so observer can match earliest.
         cfg.pending_sigs.insert(sig);
 
-        let send_at = Instant::now();
-        let result = cfg.helius.send_raw(cmd.tx.serialized).await;
-        let response_at = Instant::now();
+        let helius = cfg.helius.clone();
+        let counters = cfg.counters.clone();
+        let send_event_tx = cfg.send_event_tx.clone();
+        let trigger_observed_at = cmd.trigger_observed_at;
+        let schedule_slot = cmd.schedule_slot;
+        let schedule_tick = cmd.schedule_tick;
+        let serialized = cmd.tx.serialized;
+        tokio::spawn(async move {
+            let send_at = Instant::now();
+            let result = helius.send_raw(serialized).await;
+            let response_at = Instant::now();
 
-        let error = match &result {
-            Ok(_) => None,
-            Err(SendError::HttpStatus(code, body)) => {
-                cfg.counters.inc(&cfg.counters.send_http_error);
-                Some(format!("http {}: {}", code, body))
-            }
-            Err(SendError::Network(e)) => {
-                cfg.counters.inc(&cfg.counters.send_network_error);
-                Some(format!("net: {}", e))
-            }
-            Err(SendError::RpcError(msg)) => {
-                cfg.counters.inc(&cfg.counters.send_http_error);
-                Some(format!("rpc: {}", msg))
-            }
-            Err(SendError::Parse(msg)) => {
-                cfg.counters.inc(&cfg.counters.send_http_error);
-                Some(format!("parse: {}", msg))
-            }
-        };
+            let error = match &result {
+                Ok(_) => None,
+                Err(SendError::HttpStatus(code, body)) => {
+                    counters.inc(&counters.send_http_error);
+                    Some(format!("http {}: {}", code, body))
+                }
+                Err(SendError::Network(e)) => {
+                    counters.inc(&counters.send_network_error);
+                    Some(format!("net: {}", e))
+                }
+                Err(SendError::RpcError(msg)) => {
+                    counters.inc(&counters.send_http_error);
+                    Some(format!("rpc: {}", msg))
+                }
+                Err(SendError::Parse(msg)) => {
+                    counters.inc(&counters.send_http_error);
+                    Some(format!("parse: {}", msg))
+                }
+            };
 
-        let ev = SendEvent {
-            signature: sig,
-            schedule_slot: cmd.schedule_slot,
-            schedule_tick: cmd.schedule_tick,
-            trigger_observed_at: cmd.trigger_observed_at,
-            send_at,
-            response_at,
-            error,
-        };
-        if cfg.send_event_tx.try_send(ev).is_err() {
-            cfg.counters.inc(&cfg.counters.send_event_queue_full);
-        }
+            let ev = SendEvent {
+                signature: sig,
+                schedule_slot,
+                schedule_tick,
+                trigger_observed_at,
+                send_at,
+                response_at,
+                error,
+            };
+            if send_event_tx.try_send(ev).is_err() {
+                counters.inc(&counters.send_event_queue_full);
+            }
+        });
     }
     info!("sender thread exiting");
 }
