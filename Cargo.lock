@@ -11281,6 +11281,7 @@ dependencies = [
  "arrow",
  "arrow-array",
  "arrow-schema",
+ "base64 0.22.1",
  "bincode",
  "bs58",
  "chrono",

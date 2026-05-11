@@ -80,7 +80,7 @@ async fn run_loop(cfg: SenderConfig) {
         let response_at = Instant::now();
 
         let error = match &result {
-            Ok(()) => None,
+            Ok(_) => None,
             Err(SendError::HttpStatus(code, body)) => {
                 cfg.counters.inc(&cfg.counters.send_http_error);
                 Some(format!("http {}: {}", code, body))
@@ -88,6 +88,14 @@ async fn run_loop(cfg: SenderConfig) {
             Err(SendError::Network(e)) => {
                 cfg.counters.inc(&cfg.counters.send_network_error);
                 Some(format!("net: {}", e))
+            }
+            Err(SendError::RpcError(msg)) => {
+                cfg.counters.inc(&cfg.counters.send_http_error);
+                Some(format!("rpc: {}", msg))
+            }
+            Err(SendError::Parse(msg)) => {
+                cfg.counters.inc(&cfg.counters.send_http_error);
+                Some(format!("parse: {}", msg))
             }
         };
 

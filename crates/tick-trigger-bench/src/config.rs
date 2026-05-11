@@ -43,9 +43,22 @@ pub struct RunArgs {
     #[arg(long)]
     pub wallet_keypair: PathBuf,
 
+    /// Base URL of Helius Sender (the `/fast` path and query string are appended at runtime).
+    /// Examples:
+    ///   http://fra-sender.helius-rpc.com         (default)
+    ///   https://mainnet.helius-rpc.com
     #[arg(long, env = "HELIUS_SENDER_URL",
-          default_value = "https://fra-sender.helius-rpc.com/fast?swqos_only=true")]
+          default_value = "http://fra-sender.helius-rpc.com")]
     pub helius_sender_url: String,
+
+    /// Optional API key appended as `?api-key=XXX`. Helius Sender works without
+    /// a key at public rate limits; provide one for higher throughput.
+    #[arg(long, env = "HELIUS_SENDER_API_KEY")]
+    pub helius_sender_api_key: Option<String>,
+
+    /// If true, request swQoS-only routing (no Jito tip path).
+    #[arg(long, env = "HELIUS_SENDER_SWQOS_ONLY", default_value_t = true)]
+    pub helius_sender_swqos_only: bool,
 
     #[arg(long, env = "HELIUS_RPC_URL")]
     pub helius_rpc_url: String,

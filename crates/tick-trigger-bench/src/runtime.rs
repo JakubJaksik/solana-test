@@ -96,7 +96,11 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
     let schedule_set: Arc<std::collections::HashSet<(u64, u8)>> = Arc::new(schedule_inner);
     let schedule_arc = Arc::new(schedule.entries.clone());
 
-    let helius = Arc::new(HeliusSender::new(args.helius_sender_url.clone())?);
+    let helius = Arc::new(HeliusSender::new(
+        args.helius_sender_url.clone(),
+        args.helius_sender_api_key.clone(),
+        args.helius_sender_swqos_only,
+    )?);
 
     let ss_src = Box::new(ShredStreamGrpcSource {
         endpoint: args.shredstream_grpc_url.clone(),
