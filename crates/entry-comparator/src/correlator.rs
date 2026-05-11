@@ -69,7 +69,7 @@ fn run_loop(cfg: CorrelatorConfig) {
         shutdown,
         ..
     } = cfg;
-    let mut map: HashMap<(u64, u32), MatchState> = HashMap::with_capacity(8192);
+    let mut map: HashMap<(u64, [u8; 32]), MatchState> = HashMap::with_capacity(8192);
     let mut last_sweep = Instant::now();
 
     loop {
@@ -100,14 +100,14 @@ fn run_loop(cfg: CorrelatorConfig) {
 }
 
 fn handle(
-    map: &mut HashMap<(u64, u32), MatchState>,
+    map: &mut HashMap<(u64, [u8; 32]), MatchState>,
     diff_tx: &Sender<DiffRecord>,
     anchor: Instant,
     obs: EntryObservation,
     leader: &dyn LeaderLookup,
     diff_dropped: &AtomicU64,
 ) {
-    let key = (obs.slot, obs.entry_index);
+    let key = (obs.slot, obs.entry_hash.to_bytes());
     let entry = map.entry(key).or_insert_with(|| MatchState {
         yellowstone: None,
         shredstream: None,
@@ -124,7 +124,7 @@ fn handle(
 }
 
 fn sweep(
-    map: &mut HashMap<(u64, u32), MatchState>,
+    map: &mut HashMap<(u64, [u8; 32]), MatchState>,
     diff_tx: &Sender<DiffRecord>,
     anchor: Instant,
     now: Instant,
@@ -132,7 +132,7 @@ fn sweep(
     leader: &dyn LeaderLookup,
     diff_dropped: &AtomicU64,
 ) {
-    let stale: Vec<(u64, u32)> = map
+    let stale: Vec<(u64, [u8; 32])> = map
         .iter()
         .filter(|(_, st)| now.duration_since(st.inserted_at) >= deadline)
         .map(|(k, _)| *k)

@@ -89,7 +89,10 @@ fn emits_single_source_after_deadline() {
 }
 
 #[test]
-fn hash_mismatch_when_hashes_differ() {
+fn different_hashes_emit_as_separate_sources() {
+    // With the (slot, entry_hash) match key, two observations for the same slot
+    // but different hashes are NOT matched — they emit as YS_ONLY and SS_ONLY
+    // after the deadline elapses.
     let (ys_tx, ys_rx) = bounded(64);
     let (ss_tx, ss_rx) = bounded(64);
     let (diff_tx, diff_rx) = bounded(64);
@@ -98,7 +101,7 @@ fn hash_mismatch_when_hashes_differ() {
         ss_rx,
         diff_tx,
         anchor: Instant::now(),
-        deadline: Duration::from_secs(5),
+        deadline: Duration::from_millis(300),
         pinned_core: None,
         leader_lookup: Arc::new(NoopLeader),
         diff_dropped: Arc::new(AtomicU64::new(0)),
@@ -113,9 +116,11 @@ fn hash_mismatch_when_hashes_differ() {
         .send(make(SourceKind::ShredStream, 1, 0, Hash::new_from_array([2; 32])))
         .unwrap();
 
-    let rec = diff_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert_eq!(rec.source, Source::Both);
-    assert!(!rec.hash_match);
+    let r1 = diff_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let r2 = diff_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let sources: std::collections::HashSet<_> = [r1.source, r2.source].into_iter().collect();
+    assert!(sources.contains(&Source::YsOnly));
+    assert!(sources.contains(&Source::SsOnly));
 }
 
 #[test]

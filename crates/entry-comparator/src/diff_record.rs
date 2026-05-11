@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use solana_sdk::signature::Signature;
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Source {
     Both,
     YsOnly,
