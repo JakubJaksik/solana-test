@@ -42,7 +42,7 @@ impl BenchCounters {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, serde::Serialize)]
 pub struct CounterSnapshot {
     pub pool_empty: u64,
     pub send_queue_full: u64,

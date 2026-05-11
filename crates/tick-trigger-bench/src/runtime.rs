@@ -251,6 +251,33 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
         warn!(?e, "rpc fallback panicked");
     }
 
+    let snap = counters.snapshot();
+    let counters_path = run_dir.join("final-counters.json");
+    match serde_json::to_string_pretty(&snap) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&counters_path, json) {
+                warn!(error = %e, path = ?counters_path, "failed to write final-counters.json");
+            }
+        }
+        Err(e) => warn!(error = %e, "failed to serialize counters"),
+    }
+    info!(
+        pool_empty = snap.pool_empty,
+        send_queue_full = snap.send_queue_full,
+        send_http_error = snap.send_http_error,
+        send_network_error = snap.send_network_error,
+        blockhash_expired = snap.blockhash_expired,
+        match_queue_full = snap.match_queue_full,
+        send_event_queue_full = snap.send_event_queue_full,
+        final_queue_full = snap.final_queue_full,
+        tick_event_queue_full = snap.tick_event_queue_full,
+        preparer_blockhash_fail = snap.preparer_blockhash_fail,
+        preparer_signing_fail = snap.preparer_signing_fail,
+        fork_tick_overflow = snap.fork_tick_overflow,
+        rpc_fallback_error = snap.rpc_fallback_error,
+        "final counters"
+    );
+
     info!(?parquet_path, "shutdown complete");
     Ok(())
 }
