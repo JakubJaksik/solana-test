@@ -82,6 +82,12 @@ pub struct RunArgs {
     #[arg(long, default_value_t = 5000)]
     pub priority_fee_microlamports: u64,
 
+    /// Helius Sender tip in lamports (mandatory, see Helius docs).
+    /// Each tx transfers this amount to a randomly-chosen Helius tip wallet.
+    /// Set to 0 only if you have a paid Helius API key that waives this.
+    #[arg(long, default_value_t = 5000)]
+    pub helius_tip_lamports: u64,
+
     #[arg(long, default_value_t = 32_768)]
     pub row_group_size: usize,
 

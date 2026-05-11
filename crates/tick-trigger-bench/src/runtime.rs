@@ -140,6 +140,7 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
         look_ahead_slots: args.look_ahead_slots,
         amount_lamports: args.tx_amount_lamports,
         priority_fee_microlamports: args.priority_fee_microlamports,
+        helius_tip_lamports: args.helius_tip_lamports,
         pinned_core: cores.get("preparer").copied(),
         counters: counters.clone(),
         stop: stop.clone(),

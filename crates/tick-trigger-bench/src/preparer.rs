@@ -24,6 +24,7 @@ pub struct PreparerConfig {
     pub look_ahead_slots: u64,            // default 100
     pub amount_lamports: u64,
     pub priority_fee_microlamports: u64,
+    pub helius_tip_lamports: u64,
     pub pinned_core: Option<usize>,
     pub counters: Arc<BenchCounters>,
     pub stop: Arc<AtomicBool>,
@@ -98,6 +99,7 @@ fn run_loop(cfg: PreparerConfig) {
                 &cfg.keypair,
                 cfg.amount_lamports,
                 cfg.priority_fee_microlamports,
+                cfg.helius_tip_lamports,
                 blockhash,
             );
             let sig = primary_signature(&tx);
@@ -137,7 +139,7 @@ mod tests {
         // Smoke test that we're calling build_self_transfer correctly with our types.
         let kp = Keypair::new();
         let bh = Hash::new_unique();
-        let tx = build_self_transfer(&kp, 1, 5000, bh);
+        let tx = build_self_transfer(&kp, 1, 5000, 5000, bh);
         assert!(tx.is_signed());
         let _sig = primary_signature(&tx);
     }

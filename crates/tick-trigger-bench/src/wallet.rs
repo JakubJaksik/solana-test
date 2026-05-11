@@ -1,14 +1,33 @@
 use std::path::Path;
+use std::str::FromStr;
 use anyhow::Context;
 use serde::Deserialize;
 use solana_compute_budget_interface::ComputeBudgetInstruction;
 use solana_sdk::{
     hash::Hash,
     instruction::Instruction,
+    pubkey::Pubkey,
     signature::{read_keypair_file, Keypair, Signature, Signer},
     transaction::Transaction,
 };
 use solana_system_interface::instruction as system_instruction;
+
+/// Helius Sender tip accounts (from Helius docs / production runtime error).
+/// One of these must receive at least `min_tip_lamports` per tx, otherwise
+/// Helius Sender returns RPC error -32602.
+pub const HELIUS_TIP_ACCOUNTS: &[&str] = &[
+    "3KCKozbAaF75qEU33jtzozcJ29yJuaLJTy2jFdzUY8bT",
+    "9bnz4RShgq1hAnLnZbP8kbgBg1kEmcJBYQq3gQbmnSta",
+    "wyvPkWjVZz1M8fHQnMMCDTQDbkManefNNhweYk5WkcF",
+    "4TQLFNWK8AovT1gFvda5jfw2oJeRMKEmw7aH6MGBJ3or",
+    "D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ",
+    "5VY91ws6B2hMmBFRsXkoAAdsPHBJwRfBht4DXox3xkwn",
+    "4vieeGHPYPG2MmyPRcYjdiDmmhN3ww7hsFNap8pVN3Ey",
+    "D1Mc6j9xQWgR1o1Z7yU5nVVXFQiAYx7FG9AW1aVfwrUM",
+    "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE",
+    "2nyhqdwKcJZR2vcqCyrYsaPVdAnFoJjiksCXJ7hfEYgD",
+    "2q5pghRs6arqVjRvT5gfgWfWcHWmw1ZuCzphgd5KfWGJ",
+];
 
 /// User-friendly keypair config:
 /// ```json
@@ -85,22 +104,32 @@ fn keypair_from_base58(s: &str) -> anyhow::Result<Keypair> {
 }
 
 /// Build + sign a self-transfer of `amount_lamports` from `payer` to itself,
-/// with `priority_fee_microlamports` set via ComputeBudget.
+/// with `priority_fee_microlamports` set via ComputeBudget and a mandatory
+/// Helius Sender tip transfer of `helius_tip_lamports` to a randomly-chosen
+/// Helius tip wallet (required to avoid RPC error -32602).
 pub fn build_self_transfer(
     payer: &Keypair,
     amount_lamports: u64,
     priority_fee_microlamports: u64,
+    helius_tip_lamports: u64,
     blockhash: Hash,
 ) -> Transaction {
     let payer_pk = payer.pubkey();
-    let mut ixs: Vec<Instruction> = Vec::with_capacity(3);
+    let mut ixs: Vec<Instruction> = Vec::with_capacity(4);
     // priority fee (compute unit price); 0 microlamports means skip the ix
     if priority_fee_microlamports > 0 {
         ixs.push(ComputeBudgetInstruction::set_compute_unit_price(priority_fee_microlamports));
     }
     // tight compute unit limit — self-transfer is well under 200 CUs
     ixs.push(ComputeBudgetInstruction::set_compute_unit_limit(450));
-    // self-transfer
+    // Helius tip transfer (mandatory for Helius Sender). Always use the first
+    // tip wallet — deterministic, sufficient for our test scale (~8 tx/s).
+    if helius_tip_lamports > 0 {
+        let tip_pk = Pubkey::from_str(HELIUS_TIP_ACCOUNTS[0])
+            .expect("HELIUS_TIP_ACCOUNTS[0] is a valid base58 pubkey");
+        ixs.push(system_instruction::transfer(&payer_pk, &tip_pk, helius_tip_lamports));
+    }
+    // self-transfer (payload of the test)
     ixs.push(system_instruction::transfer(&payer_pk, &payer_pk, amount_lamports));
 
     let mut tx = Transaction::new_with_payer(&ixs, Some(&payer_pk));
@@ -126,7 +155,7 @@ mod tests {
     fn build_self_transfer_signs_and_serializes() {
         let kp = Keypair::new();
         let bh = Hash::new_unique();
-        let tx = build_self_transfer(&kp, 1, 5000, bh);
+        let tx = build_self_transfer(&kp, 1, 5000, 5000, bh);
         assert_eq!(tx.signatures.len(), 1);
         assert!(tx.is_signed());
         let bytes = serialize_tx(&tx);
@@ -139,18 +168,35 @@ mod tests {
     fn zero_priority_fee_skips_compute_unit_price() {
         let kp = Keypair::new();
         let bh = Hash::new_unique();
-        let tx = build_self_transfer(&kp, 1, 0, bh);
-        // 2 instructions: compute_unit_limit + transfer
-        assert_eq!(tx.message.instructions.len(), 2);
+        let tx = build_self_transfer(&kp, 1, 0, 5000, bh);
+        // 3 instructions: compute_unit_limit + helius_tip + self_transfer
+        assert_eq!(tx.message.instructions.len(), 3);
     }
 
     #[test]
     fn priority_fee_adds_compute_unit_price() {
         let kp = Keypair::new();
         let bh = Hash::new_unique();
-        let tx = build_self_transfer(&kp, 1, 1000, bh);
-        // 3 instructions: cu_price + cu_limit + transfer
+        let tx = build_self_transfer(&kp, 1, 1000, 5000, bh);
+        // 4 instructions: cu_price + cu_limit + helius_tip + self_transfer
+        assert_eq!(tx.message.instructions.len(), 4);
+    }
+
+    #[test]
+    fn zero_helius_tip_skips_tip_instruction() {
+        let kp = Keypair::new();
+        let bh = Hash::new_unique();
+        let tx = build_self_transfer(&kp, 1, 1000, 0, bh);
+        // 3 instructions: cu_price + cu_limit + self_transfer (no helius tip)
         assert_eq!(tx.message.instructions.len(), 3);
+    }
+
+    #[test]
+    fn helius_tip_accounts_all_valid_pubkeys() {
+        assert_eq!(HELIUS_TIP_ACCOUNTS.len(), 11);
+        for s in HELIUS_TIP_ACCOUNTS {
+            Pubkey::from_str(s).expect("valid pubkey");
+        }
     }
 
     #[test]
