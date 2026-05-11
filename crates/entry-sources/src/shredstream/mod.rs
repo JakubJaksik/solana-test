@@ -1,6 +1,9 @@
 pub mod deshred;
 pub mod fec_tracker;
+pub mod grpc;
 pub mod udp_rx;
+
+pub use grpc::ShredStreamGrpcSource;
 
 use std::net::SocketAddr;
 use std::sync::Arc;

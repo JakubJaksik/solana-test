@@ -8,9 +8,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::bounded;
 use entry_sources::shredstream::udp_rx::DEFAULT_RX_BUFFER_BYTES;
-use entry_sources::shredstream::ShredStreamSource;
+use entry_sources::shredstream::{ShredStreamGrpcSource, ShredStreamSource};
 use entry_sources::yellowstone::YellowstoneSource;
 use entry_sources::{DropCounters, EntrySource};
+
+use crate::config::ShredstreamMode;
 use serde::Serialize;
 use solana_client::rpc_client::RpcClient;
 use tracing::{info, warn};
@@ -70,17 +72,32 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
     });
     let ys_rx = ys_src.start()?;
 
-    // Spawn ShredStream source.
-    let ss_src = Box::new(ShredStreamSource {
-        bind: args.shredstream_bind,
-        udp_channel_capacity: args.channel_capacity,
-        obs_channel_capacity: args.channel_capacity,
-        udp_pinned_core: cores.get("ss_rx").copied(),
-        deshred_pinned_core: cores.get("deshred").copied(),
-        rx_buffer_bytes: DEFAULT_RX_BUFFER_BYTES,
-        counters: counters.clone(),
-    });
-    let ss_rx = ss_src.start()?;
+    // Spawn ShredStream source (grpc by default; udp legacy via flag).
+    let ss_rx = match args.shredstream_mode {
+        ShredstreamMode::Grpc => {
+            info!(endpoint = %args.shredstream_grpc_url, "starting ShredStream gRPC source");
+            let src = Box::new(ShredStreamGrpcSource {
+                endpoint: args.shredstream_grpc_url.clone(),
+                channel_capacity: args.channel_capacity,
+                pinned_core: cores.get("ss_rx").copied(),
+                counters: counters.clone(),
+            });
+            src.start()?
+        }
+        ShredstreamMode::Udp => {
+            info!(bind = %args.shredstream_bind, "starting ShredStream raw-UDP source (legacy)");
+            let src = Box::new(ShredStreamSource {
+                bind: args.shredstream_bind,
+                udp_channel_capacity: args.channel_capacity,
+                obs_channel_capacity: args.channel_capacity,
+                udp_pinned_core: cores.get("ss_rx").copied(),
+                deshred_pinned_core: cores.get("deshred").copied(),
+                rx_buffer_bytes: DEFAULT_RX_BUFFER_BYTES,
+                counters: counters.clone(),
+            });
+            src.start()?
+        }
+    };
 
     // Shutdown signal — set true after duration; correlator picks it up and exits,
     // dropping its diff_tx → writer sees Disconnected → flushes + writes Parquet footer.

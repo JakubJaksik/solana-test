@@ -2,7 +2,18 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Default)]
+pub enum ShredstreamMode {
+    /// Consume entries via gRPC from `jito-shredstream-proxy --grpc-service-port`.
+    /// Proxy performs FEC reconstruction itself; lower bug surface, no per-shred timestamp.
+    #[default]
+    Grpc,
+    /// Consume raw shred packets via UDP and reconstruct entries ourselves
+    /// (legacy path; lacks FEC recovery — keep for step-1 experiments).
+    Udp,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "entry-comparator")]
@@ -32,6 +43,16 @@ pub struct RunArgs {
     #[arg(long, env = "SOLANA_RPC_URL", default_value = "https://api.mainnet-beta.solana.com")]
     pub rpc_url: String,
 
+    /// Source mode for ShredStream side.
+    #[arg(long, value_enum, default_value_t = ShredstreamMode::Grpc)]
+    pub shredstream_mode: ShredstreamMode,
+
+    /// gRPC endpoint of jito-shredstream-proxy when --shredstream-mode=grpc.
+    /// Must match the proxy's `--grpc-service-port`.
+    #[arg(long, default_value = "http://127.0.0.1:9999")]
+    pub shredstream_grpc_url: String,
+
+    /// UDP bind address when --shredstream-mode=udp (legacy raw-shred path).
     #[arg(long, default_value = "127.0.0.1:8001")]
     pub shredstream_bind: SocketAddr,
 
