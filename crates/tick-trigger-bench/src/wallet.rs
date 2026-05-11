@@ -120,8 +120,10 @@ pub fn build_self_transfer(
     if priority_fee_microlamports > 0 {
         ixs.push(ComputeBudgetInstruction::set_compute_unit_price(priority_fee_microlamports));
     }
-    // tight compute unit limit — self-transfer is well under 200 CUs
-    ixs.push(ComputeBudgetInstruction::set_compute_unit_limit(450));
+    // Compute unit limit: enough for 2× ComputeBudget invokes + 2× SystemProgram::Transfer.
+    // Each invoke costs ~150 CUs → 600 CU minimum. Set to 2000 for safety margin.
+    // Priority fee = price × limit, so 5000 microlamports × 2000 CU = 10 lamports/tx.
+    ixs.push(ComputeBudgetInstruction::set_compute_unit_limit(2000));
     // Helius tip transfer (mandatory for Helius Sender). Always use the first
     // tip wallet — deterministic, sufficient for our test scale (~8 tx/s).
     if helius_tip_lamports > 0 {
