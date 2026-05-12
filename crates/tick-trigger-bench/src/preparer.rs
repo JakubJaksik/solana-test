@@ -95,9 +95,14 @@ fn run_loop(cfg: PreparerConfig) {
                 continue;
             }
             let built_at = Instant::now();
+            // Per-tx amount discriminator: each tx in this cycle gets a unique
+            // amount (base + N). Without this, all tx bodies in a cycle are
+            // byte-identical → same Ed25519 signature → Helius dedupes and the
+            // writer's map.entry().or_insert() silently drops duplicates.
+            let amount = cfg.amount_lamports.saturating_add(new_signed as u64);
             let tx = build_self_transfer(
                 &cfg.keypair,
-                cfg.amount_lamports,
+                amount,
                 cfg.priority_fee_microlamports,
                 cfg.helius_tip_lamports,
                 blockhash,
