@@ -6,6 +6,7 @@ use std::time::Instant;
 use crossbeam_channel::{Receiver, Sender};
 use dashmap::DashSet;
 use entry_sources::EntryObservation;
+use solana_sdk::hash::Hash;
 use solana_sdk::signature::Signature;
 use tracing::{info, warn};
 
@@ -25,16 +26,13 @@ struct SlotState {
     tick_idx: u8,
     /// Cumulative num_hashes since the last valid tick.
     hash_count: u64,
-    /// True if we joined this slot mid-stream (first observed entry had
-    /// entry_index > 0). Skip tick numbering and schedule triggers — our
-    /// hash_count would be off relative to PoH ground truth.
-    skip: bool,
-    /// entry_index values already processed for this slot. Prevents
-    /// duplicate shreds or fork-duplicate entries from inflating
-    /// hash_count and tick_idx (observed tick_idx=255 on prod runs).
-    seen_entries: HashSet<u32>,
-    /// True once we've observed at least one entry from this slot.
-    initialized: bool,
+    /// PoH entry hashes already processed for this slot. Prevents duplicate
+    /// shred deliveries / fork-duplicate entries from inflating hash_count
+    /// and pushing tick_idx past 64 (observed tick_idx=255 saturated in
+    /// prod runs). entry_hash is unique per PoH entry and stable across
+    /// duplicate shred deliveries — safer than entry_index, which is a
+    /// local counter assigned in FEC-completion order, not PoH order.
+    seen_entries: HashSet<Hash>,
 }
 
 #[derive(Debug)]
@@ -81,6 +79,9 @@ pub fn spawn(cfg: ObserverConfig) -> std::io::Result<std::thread::JoinHandle<()>
 
 fn run_loop(cfg: ObserverConfig) {
     let mut slot_state: HashMap<u64, SlotState> = HashMap::with_capacity(2048);
+    // Skip the first slot we observe (we may have subscribed mid-slot;
+    // its cumulative hash count is incomplete and tick numbering would be off).
+    let mut first_slot_seen: Option<u64> = None;
 
     loop {
         if cfg.stop.load(Ordering::Relaxed) {
@@ -99,79 +100,69 @@ fn run_loop(cfg: ObserverConfig) {
 
         cfg.current_slot.store(slot, Ordering::Relaxed);
 
-        {
-        let state = slot_state.entry(slot).or_default();
-
-        // First observation for this slot: decide whether we can trust
-        // tick numbering. If we joined after entry_index 0 we missed
-        // earlier entries → hash_count base is wrong → all tick_idx
-        // values for this slot will be offset from PoH ground truth.
-        if !state.initialized {
-            state.initialized = true;
-            if obs.entry_index != 0 {
-                state.skip = true;
-            }
+        if first_slot_seen.is_none() {
+            first_slot_seen = Some(slot);
         }
+        let in_warmup = Some(slot) == first_slot_seen;
 
-        if state.skip {
-            // still process signature matches below (pending_sigs lookup
-            // by signature is slot-agnostic and useful for diagnostics);
-            // skip tick counting + schedule trigger only.
-        } else if state.seen_entries.insert(obs.entry_index) {
-            // First time we see this entry_index for this slot. Duplicates
-            // (re-deshredded after FEC recovery, fork-duplicate banks) are
-            // dropped — they would otherwise inflate hash_count and push
-            // tick_idx past 64 (observed tick_idx=255 on prod runs).
-            state.hash_count = state.hash_count.saturating_add(obs.num_hashes);
+        if !in_warmup {
+            let state = slot_state.entry(slot).or_default();
 
-            if obs.tx_count == 0 {
-                if state.hash_count == HASHES_PER_TICK {
-                    state.tick_idx = state.tick_idx.saturating_add(1);
-                    state.hash_count = 0;
-                    let tick_val = state.tick_idx;
+            if state.seen_entries.insert(obs.entry_hash) {
+                // First time we see this PoH entry for this slot. Duplicate shred
+                // deliveries / fork-duplicate entries are dropped — they would
+                // otherwise inflate hash_count and push tick_idx past 64
+                // (observed tick_idx=255 saturated in prod runs).
+                state.hash_count = state.hash_count.saturating_add(obs.num_hashes);
 
-                    let ev = TickEvent {
-                        observed_at,
-                        slot,
-                        tick_idx: tick_val,
-                        num_hashes: obs.num_hashes,
-                    };
-                    if cfg.tick_event_tx.try_send(ev).is_err() {
-                        cfg.counters.inc(&cfg.counters.tick_event_queue_full);
-                    }
+                if obs.tx_count == 0 {
+                    if state.hash_count == HASHES_PER_TICK {
+                        state.tick_idx = state.tick_idx.saturating_add(1);
+                        state.hash_count = 0;
+                        let tick_val = state.tick_idx;
 
-                    if tick_val > 64 {
-                        cfg.counters.inc(&cfg.counters.fork_tick_overflow);
-                        continue;
-                    }
-
-                    cfg.counters.inc(&cfg.counters.schedule_contains_calls);
-                    let hit = cfg.schedule.contains(&(slot, tick_val));
-                    if hit {
-                        cfg.counters.inc(&cfg.counters.schedule_contains_true);
-                    }
-                    if hit {
-                        if let Some(tx) = cfg.pool.take(slot, tick_val) {
-                            let cmd = SendCommand {
-                                tx,
-                                schedule_slot: slot,
-                                schedule_tick: tick_val,
-                                trigger_observed_at: observed_at,
-                            };
-                            if cfg.send_queue.try_send(cmd).is_err() {
-                                cfg.counters.inc(&cfg.counters.send_queue_full);
-                            }
-                        } else {
-                            cfg.counters.inc(&cfg.counters.pool_empty);
+                        let ev = TickEvent {
+                            observed_at,
+                            slot,
+                            tick_idx: tick_val,
+                            num_hashes: obs.num_hashes,
+                        };
+                        if cfg.tick_event_tx.try_send(ev).is_err() {
+                            cfg.counters.inc(&cfg.counters.tick_event_queue_full);
                         }
+
+                        if tick_val > 64 {
+                            cfg.counters.inc(&cfg.counters.fork_tick_overflow);
+                            continue;
+                        }
+
+                        cfg.counters.inc(&cfg.counters.schedule_contains_calls);
+                        let hit = cfg.schedule.contains(&(slot, tick_val));
+                        if hit {
+                            cfg.counters.inc(&cfg.counters.schedule_contains_true);
+                        }
+                        if hit {
+                            if let Some(tx) = cfg.pool.take(slot, tick_val) {
+                                let cmd = SendCommand {
+                                    tx,
+                                    schedule_slot: slot,
+                                    schedule_tick: tick_val,
+                                    trigger_observed_at: observed_at,
+                                };
+                                if cfg.send_queue.try_send(cmd).is_err() {
+                                    cfg.counters.inc(&cfg.counters.send_queue_full);
+                                }
+                            } else {
+                                cfg.counters.inc(&cfg.counters.pool_empty);
+                            }
+                        }
+                    } else {
+                        // Empty entry but cumulative hash count != HASHES_PER_TICK.
+                        // Either leader-emitted no-op or our hash_count is off.
+                        cfg.counters.inc(&cfg.counters.fork_tick_overflow);
                     }
-                } else {
-                    // Empty entry but cumulative hash count != HASHES_PER_TICK.
-                    // Either leader-emitted no-op or our hash_count is off.
-                    cfg.counters.inc(&cfg.counters.fork_tick_overflow);
                 }
             }
-        }
         }
 
         for sig in &obs.signatures {
