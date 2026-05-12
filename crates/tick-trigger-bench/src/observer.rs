@@ -13,6 +13,20 @@ use crate::counters::BenchCounters;
 use crate::sidecar::TickEvent;
 use crate::tx_pool::{PreSignedTx, TxPool};
 
+/// Solana mainnet hashes_per_tick (10M hashes/s / 160 ticks/s). Used to
+/// validate ticks per runtime's verify_tick_hash_count: a real PoH tick is
+/// an empty entry where cumulative num_hashes since previous tick equals
+/// this value. Empty entries that don't match are skipped.
+const HASHES_PER_TICK: u64 = 62_500;
+
+#[derive(Debug, Default)]
+struct SlotState {
+    /// Index of the last valid PoH tick observed in this slot (1..=64).
+    tick_idx: u8,
+    /// Cumulative num_hashes since the last valid tick.
+    hash_count: u64,
+}
+
 #[derive(Debug)]
 pub struct SendCommand {
     pub tx: PreSignedTx,
@@ -56,7 +70,10 @@ pub fn spawn(cfg: ObserverConfig) -> std::io::Result<std::thread::JoinHandle<()>
 }
 
 fn run_loop(cfg: ObserverConfig) {
-    let mut slot_tick: HashMap<u64, u8> = HashMap::with_capacity(2048);
+    let mut slot_state: HashMap<u64, SlotState> = HashMap::with_capacity(2048);
+    // Skip the first slot we observe (we may have subscribed mid-slot;
+    // its cumulative hash count is incomplete and tick numbering would be off).
+    let mut first_slot_seen: Option<u64> = None;
 
     loop {
         if cfg.stop.load(Ordering::Relaxed) {
@@ -69,47 +86,69 @@ fn run_loop(cfg: ObserverConfig) {
         let observed_at = obs.observed_at;
         let slot = obs.slot;
 
-        if slot_tick.len() > 4096 {
-            slot_tick.retain(|s, _| *s + 200 >= slot);
+        if slot_state.len() > 4096 {
+            slot_state.retain(|s, _| *s + 200 >= slot);
         }
 
         cfg.current_slot.store(slot, Ordering::Relaxed);
 
-        // is_tick() per solana_entry definition: transactions.is_empty().
-        // verify_tick_hash_count guarantees that any tx_count==0 entry in a valid
-        // slot IS a tick (between ticks there can't be empty data entries).
-        if obs.tx_count == 0 {
-            let tick_idx = slot_tick.entry(slot).and_modify(|v| *v += 1).or_insert(1);
-            let tick_val: u8 = *tick_idx;
+        // Establish first-slot warmup boundary
+        if first_slot_seen.is_none() {
+            first_slot_seen = Some(slot);
+        }
+        let in_warmup = Some(slot) == first_slot_seen;
+        // Still process match path during warmup (sigs irrelevant for tick numbering)
+        // but skip tick counting + schedule trigger.
 
-            let ev = TickEvent {
-                observed_at,
-                slot,
-                tick_idx: tick_val,
-                num_hashes: obs.num_hashes,
-            };
-            if cfg.tick_event_tx.try_send(ev).is_err() {
-                cfg.counters.inc(&cfg.counters.tick_event_queue_full);
-            }
+        if !in_warmup {
+            let state = slot_state.entry(slot).or_default();
+            state.hash_count = state.hash_count.saturating_add(obs.num_hashes);
 
-            if tick_val > 64 {
-                cfg.counters.inc(&cfg.counters.fork_tick_overflow);
-                continue;
-            }
+            // is_tick() per solana_entry: transactions.is_empty().
+            // Per verify_tick_hash_count: a VALID tick has cumulative
+            // num_hashes since previous tick == HASHES_PER_TICK. Empty
+            // entries that don't match (fork dup, empty data entries
+            // emitted by some leaders) are skipped.
+            if obs.tx_count == 0 {
+                if state.hash_count == HASHES_PER_TICK {
+                    state.tick_idx = state.tick_idx.saturating_add(1);
+                    state.hash_count = 0;
+                    let tick_val = state.tick_idx;
 
-            if cfg.schedule.contains(&(slot, tick_val)) {
-                if let Some(tx) = cfg.pool.take(slot, tick_val) {
-                    let cmd = SendCommand {
-                        tx,
-                        schedule_slot: slot,
-                        schedule_tick: tick_val,
-                        trigger_observed_at: observed_at,
+                    let ev = TickEvent {
+                        observed_at,
+                        slot,
+                        tick_idx: tick_val,
+                        num_hashes: obs.num_hashes,
                     };
-                    if cfg.send_queue.try_send(cmd).is_err() {
-                        cfg.counters.inc(&cfg.counters.send_queue_full);
+                    if cfg.tick_event_tx.try_send(ev).is_err() {
+                        cfg.counters.inc(&cfg.counters.tick_event_queue_full);
+                    }
+
+                    if tick_val > 64 {
+                        cfg.counters.inc(&cfg.counters.fork_tick_overflow);
+                        continue;
+                    }
+
+                    if cfg.schedule.contains(&(slot, tick_val)) {
+                        if let Some(tx) = cfg.pool.take(slot, tick_val) {
+                            let cmd = SendCommand {
+                                tx,
+                                schedule_slot: slot,
+                                schedule_tick: tick_val,
+                                trigger_observed_at: observed_at,
+                            };
+                            if cfg.send_queue.try_send(cmd).is_err() {
+                                cfg.counters.inc(&cfg.counters.send_queue_full);
+                            }
+                        } else {
+                            cfg.counters.inc(&cfg.counters.pool_empty);
+                        }
                     }
                 } else {
-                    cfg.counters.inc(&cfg.counters.pool_empty);
+                    // Empty entry but cumulative hash count != HASHES_PER_TICK.
+                    // Either fork duplicate or leader-emitted no-op entry.
+                    cfg.counters.inc(&cfg.counters.fork_tick_overflow);
                 }
             }
         }
@@ -121,7 +160,7 @@ fn run_loop(cfg: ObserverConfig) {
                     observed_at,
                     observed_slot: slot,
                     observed_entry_index: obs.entry_index,
-                    observed_tick_in_slot: slot_tick.get(&slot).copied(),
+                    observed_tick_in_slot: slot_state.get(&slot).map(|s| s.tick_idx),
                 };
                 if cfg.match_queue.try_send(ev).is_err() {
                     cfg.counters.inc(&cfg.counters.match_queue_full);
@@ -130,7 +169,7 @@ fn run_loop(cfg: ObserverConfig) {
         }
     }
     info!("ss-observer thread exiting");
-    warn!(slot_tick_table_len = slot_tick.len(), "observer final state");
+    warn!(slot_state_len = slot_state.len(), "observer final state");
 }
 
 #[cfg(test)]
@@ -198,6 +237,9 @@ mod tests {
         })
         .unwrap();
 
+        // Warmup slot first (will be skipped per first-slot policy)
+        entry_tx.send(make_tick(999, 62_500, 0)).unwrap();
+        // Then real test slot
         entry_tx.send(make_tick(1000, 62_500, 0)).unwrap();
         entry_tx.send(make_tick(1000, 62_500, 1)).unwrap();
         entry_tx.send(make_tick(1000, 62_500, 2)).unwrap();
@@ -244,6 +286,8 @@ mod tests {
         })
         .unwrap();
 
+        // Warmup slot first
+        entry_tx.send(make_tick(999, 62_500, 0)).unwrap();
         entry_tx.send(make_tick(1000, 62_500, 0)).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(counters.snapshot().pool_empty, 1);
