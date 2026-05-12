@@ -20,7 +20,7 @@ use crate::preparer::PreparerConfig;
 use crate::rpc_fallback::FallbackQueue;
 use crate::run_meta::write_run_meta;
 use crate::schedule::Schedule;
-use crate::sender::SenderConfig;
+use crate::sender::DispatcherConfig;
 use crate::tx_pool::TxPool;
 use crate::wallet::load_keypair;
 use crate::writer::{spawn_finalizer, spawn_parquet, ParquetWriterConfig, WriterConfig};
@@ -124,11 +124,24 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
     });
     let entry_rx = ss_src.start()?;
 
-    let (send_q_tx, send_q_rx) = bounded(args.channel_capacity);
+    // Tokio mpsc for SendCommand — replaces crossbeam to let observer (sync
+    // thread) feed the async dispatcher directly without an intermediate
+    // sender thread or per-request tokio::spawn. observer uses `try_send`
+    // which is sync and safe from std::thread.
+    let (send_q_tx, send_q_rx) =
+        tokio::sync::mpsc::channel::<crate::observer::SendCommand>(args.channel_capacity);
     let (match_q_tx, match_q_rx) = bounded(args.channel_capacity);
     let (send_ev_tx, send_ev_rx) = bounded(args.channel_capacity);
     let (final_tx, final_rx) = bounded(args.channel_capacity);
     let (tick_event_tx, tick_event_rx) = crossbeam_channel::bounded(args.channel_capacity);
+
+    // Build the single tokio runtime used by the send dispatcher.
+    let tokio_rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .thread_name("tokio-sender")
+        .build()?;
+    let tokio_handle = tokio_rt.handle().clone();
 
     let obs_handle = crate::observer::spawn(ObserverConfig {
         entry_rx,
@@ -162,16 +175,17 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
 
     let fallback_q = FallbackQueue::default();
 
-    let send_handle = crate::sender::spawn(SenderConfig {
+    // Spawn the async dispatcher on the tokio runtime. No dedicated sender
+    // thread; observer.try_send → tokio mpsc → for_each_concurrent(8).
+    let dispatcher_handle = tokio_handle.spawn(crate::sender::run_dispatcher(DispatcherConfig {
         send_queue: send_q_rx,
         send_event_tx: send_ev_tx,
         pending_sigs: pending_sigs.clone(),
         helius: helius.clone(),
         blockhash_max_age: Duration::from_secs(50),
-        pinned_core: cores.get("sender").copied(),
+        max_inflight: 8,
         counters: counters.clone(),
-        stop: stop.clone(),
-    })?;
+    }));
 
     let writer_handle = spawn_finalizer(WriterConfig {
         send_event_rx: send_ev_rx,
@@ -246,8 +260,11 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
     if let Err(e) = obs_handle.join() {
         warn!(?e, "observer panicked");
     }
-    if let Err(e) = send_handle.join() {
-        warn!(?e, "sender panicked");
+    // Dispatcher finishes when send_q_tx (held by observer) is dropped after
+    // observer thread exits — channel close drives the for_each_concurrent
+    // to completion. block_on lets us await it from this sync context.
+    if let Err(e) = tokio_handle.block_on(dispatcher_handle) {
+        warn!(?e, "send dispatcher panicked");
     }
     if let Err(e) = prep_handle.join() {
         warn!(?e, "preparer panicked");

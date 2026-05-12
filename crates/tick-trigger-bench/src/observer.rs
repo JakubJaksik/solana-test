@@ -8,6 +8,7 @@ use dashmap::DashSet;
 use entry_sources::EntryObservation;
 use solana_sdk::hash::Hash;
 use solana_sdk::signature::Signature;
+use tokio::sync::mpsc as tokio_mpsc;
 use tracing::{info, warn};
 
 use crate::counters::BenchCounters;
@@ -65,7 +66,12 @@ pub struct ObserverConfig {
     pub entry_rx: Receiver<EntryObservation>,
     pub schedule: Arc<HashSet<(u64, u8)>>,
     pub pool: TxPool,
-    pub send_queue: Sender<SendCommand>,
+    /// Tokio mpsc — observer is a std::thread but tokio::mpsc::Sender::try_send
+    /// is sync and safe to call from non-tokio context. The receiver lives in
+    /// the async dispatcher in runtime.rs, which uses for_each_concurrent(N)
+    /// over a stream so HTTP requests run in parallel without per-request
+    /// tokio::spawn overhead.
+    pub send_queue: tokio_mpsc::Sender<SendCommand>,
     pub match_queue: Sender<MatchEvent>,
     pub pending_sigs: Arc<DashSet<Signature>>,
     pub current_slot: Arc<AtomicU64>,
@@ -161,6 +167,8 @@ fn run_loop(cfg: ObserverConfig) {
                                     schedule_tick: tick_val,
                                     trigger_observed_at: observed_at,
                                 };
+                                // tokio::sync::mpsc::Sender::try_send is sync —
+                                // safe to call from this std::thread context.
                                 if cfg.send_queue.try_send(cmd).is_err() {
                                     cfg.counters.inc(&cfg.counters.send_queue_full);
                                 }
@@ -220,10 +228,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn trigger_fires_when_schedule_matches() {
+    #[tokio::test]
+    async fn trigger_fires_when_schedule_matches() {
         let (entry_tx, entry_rx) = bounded(16);
-        let (send_tx, send_rx) = bounded::<SendCommand>(16);
+        let (send_tx, mut send_rx) = tokio_mpsc::channel::<SendCommand>(16);
         let (match_tx, _match_rx) = bounded::<MatchEvent>(16);
         let (tick_ev_tx, _tick_ev_rx) = bounded::<TickEvent>(16);
 
@@ -270,9 +278,10 @@ mod tests {
         entry_tx.send(make_tick(1000, 62_500, 1)).unwrap();
         entry_tx.send(make_tick(1000, 62_500, 2)).unwrap();
 
-        let cmd = send_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .unwrap();
+        let cmd = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            send_rx.recv(),
+        ).await.unwrap().unwrap();
         assert_eq!(cmd.schedule_slot, 1000);
         assert_eq!(cmd.schedule_tick, 2);
         stop.store(true, Ordering::Relaxed);
@@ -280,10 +289,10 @@ mod tests {
         let _ = handle.join();
     }
 
-    #[test]
-    fn pool_empty_increments_counter() {
+    #[tokio::test]
+    async fn pool_empty_increments_counter() {
         let (entry_tx, entry_rx) = bounded(16);
-        let (send_tx, _send_rx) = bounded::<SendCommand>(16);
+        let (send_tx, _send_rx) = tokio_mpsc::channel::<SendCommand>(16);
         let (match_tx, _match_rx) = bounded::<MatchEvent>(16);
         let (tick_ev_tx, _tick_ev_rx) = bounded::<TickEvent>(16);
 

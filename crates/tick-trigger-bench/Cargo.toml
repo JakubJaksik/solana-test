@@ -38,6 +38,7 @@ hostname.workspace = true
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 bincode.workspace = true
 base64 = "0.22"
+futures-util.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
