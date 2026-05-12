@@ -13,11 +13,6 @@ use crate::counters::BenchCounters;
 use crate::sidecar::TickEvent;
 use crate::tx_pool::{PreSignedTx, TxPool};
 
-/// Solana mainnet hashes_per_tick. A real PoH tick entry has exactly this many
-/// hashes; data entries between ticks have fewer. Entries with tx_count==0 but
-/// num_hashes != HASHES_PER_TICK are empty data entries, not ticks.
-const HASHES_PER_TICK: u64 = 62_500;
-
 #[derive(Debug)]
 pub struct SendCommand {
     pub tx: PreSignedTx,
@@ -80,7 +75,10 @@ fn run_loop(cfg: ObserverConfig) {
 
         cfg.current_slot.store(slot, Ordering::Relaxed);
 
-        if obs.tx_count == 0 && obs.num_hashes == HASHES_PER_TICK {
+        // is_tick() per solana_entry definition: transactions.is_empty().
+        // verify_tick_hash_count guarantees that any tx_count==0 entry in a valid
+        // slot IS a tick (between ticks there can't be empty data entries).
+        if obs.tx_count == 0 {
             let tick_idx = slot_tick.entry(slot).and_modify(|v| *v += 1).or_insert(1);
             let tick_val: u8 = *tick_idx;
 
@@ -200,9 +198,9 @@ mod tests {
         })
         .unwrap();
 
-        entry_tx.send(make_tick(1000, HASHES_PER_TICK, 0)).unwrap();
-        entry_tx.send(make_tick(1000, HASHES_PER_TICK, 1)).unwrap();
-        entry_tx.send(make_tick(1000, HASHES_PER_TICK, 2)).unwrap();
+        entry_tx.send(make_tick(1000, 62_500, 0)).unwrap();
+        entry_tx.send(make_tick(1000, 62_500, 1)).unwrap();
+        entry_tx.send(make_tick(1000, 62_500, 2)).unwrap();
 
         let cmd = send_rx
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -246,7 +244,7 @@ mod tests {
         })
         .unwrap();
 
-        entry_tx.send(make_tick(1000, HASHES_PER_TICK, 0)).unwrap();
+        entry_tx.send(make_tick(1000, 62_500, 0)).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(counters.snapshot().pool_empty, 1);
         stop.store(true, Ordering::Relaxed);
