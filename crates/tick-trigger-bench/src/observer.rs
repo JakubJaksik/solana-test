@@ -25,6 +25,16 @@ struct SlotState {
     tick_idx: u8,
     /// Cumulative num_hashes since the last valid tick.
     hash_count: u64,
+    /// True if we joined this slot mid-stream (first observed entry had
+    /// entry_index > 0). Skip tick numbering and schedule triggers — our
+    /// hash_count would be off relative to PoH ground truth.
+    skip: bool,
+    /// entry_index values already processed for this slot. Prevents
+    /// duplicate shreds or fork-duplicate entries from inflating
+    /// hash_count and tick_idx (observed tick_idx=255 on prod runs).
+    seen_entries: HashSet<u32>,
+    /// True once we've observed at least one entry from this slot.
+    initialized: bool,
 }
 
 #[derive(Debug)]
@@ -71,9 +81,6 @@ pub fn spawn(cfg: ObserverConfig) -> std::io::Result<std::thread::JoinHandle<()>
 
 fn run_loop(cfg: ObserverConfig) {
     let mut slot_state: HashMap<u64, SlotState> = HashMap::with_capacity(2048);
-    // Skip the first slot we observe (we may have subscribed mid-slot;
-    // its cumulative hash count is incomplete and tick numbering would be off).
-    let mut first_slot_seen: Option<u64> = None;
 
     loop {
         if cfg.stop.load(Ordering::Relaxed) {
@@ -92,23 +99,31 @@ fn run_loop(cfg: ObserverConfig) {
 
         cfg.current_slot.store(slot, Ordering::Relaxed);
 
-        // Establish first-slot warmup boundary
-        if first_slot_seen.is_none() {
-            first_slot_seen = Some(slot);
-        }
-        let in_warmup = Some(slot) == first_slot_seen;
-        // Still process match path during warmup (sigs irrelevant for tick numbering)
-        // but skip tick counting + schedule trigger.
+        {
+        let state = slot_state.entry(slot).or_default();
 
-        if !in_warmup {
-            let state = slot_state.entry(slot).or_default();
+        // First observation for this slot: decide whether we can trust
+        // tick numbering. If we joined after entry_index 0 we missed
+        // earlier entries → hash_count base is wrong → all tick_idx
+        // values for this slot will be offset from PoH ground truth.
+        if !state.initialized {
+            state.initialized = true;
+            if obs.entry_index != 0 {
+                state.skip = true;
+            }
+        }
+
+        if state.skip {
+            // still process signature matches below (pending_sigs lookup
+            // by signature is slot-agnostic and useful for diagnostics);
+            // skip tick counting + schedule trigger only.
+        } else if state.seen_entries.insert(obs.entry_index) {
+            // First time we see this entry_index for this slot. Duplicates
+            // (re-deshredded after FEC recovery, fork-duplicate banks) are
+            // dropped — they would otherwise inflate hash_count and push
+            // tick_idx past 64 (observed tick_idx=255 on prod runs).
             state.hash_count = state.hash_count.saturating_add(obs.num_hashes);
 
-            // is_tick() per solana_entry: transactions.is_empty().
-            // Per verify_tick_hash_count: a VALID tick has cumulative
-            // num_hashes since previous tick == HASHES_PER_TICK. Empty
-            // entries that don't match (fork dup, empty data entries
-            // emitted by some leaders) are skipped.
             if obs.tx_count == 0 {
                 if state.hash_count == HASHES_PER_TICK {
                     state.tick_idx = state.tick_idx.saturating_add(1);
@@ -152,10 +167,11 @@ fn run_loop(cfg: ObserverConfig) {
                     }
                 } else {
                     // Empty entry but cumulative hash count != HASHES_PER_TICK.
-                    // Either fork duplicate or leader-emitted no-op entry.
+                    // Either leader-emitted no-op or our hash_count is off.
                     cfg.counters.inc(&cfg.counters.fork_tick_overflow);
                 }
             }
+        }
         }
 
         for sig in &obs.signatures {
