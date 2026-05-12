@@ -130,7 +130,12 @@ fn run_loop(cfg: ObserverConfig) {
                         continue;
                     }
 
-                    if cfg.schedule.contains(&(slot, tick_val)) {
+                    cfg.counters.inc(&cfg.counters.schedule_contains_calls);
+                    let hit = cfg.schedule.contains(&(slot, tick_val));
+                    if hit {
+                        cfg.counters.inc(&cfg.counters.schedule_contains_true);
+                    }
+                    if hit {
                         if let Some(tx) = cfg.pool.take(slot, tick_val) {
                             let cmd = SendCommand {
                                 tx,

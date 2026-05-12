@@ -15,6 +15,8 @@ pub struct BenchCounters {
     pub send_event_queue_full: AtomicU64,  // send-event channel overflow (after HTTP POST)
     pub final_queue_full: AtomicU64,       // final record channel overflow in writer
     pub blockhash_expired: AtomicU64,      // tx skipped because blockhash too old
+    pub schedule_contains_calls: AtomicU64, // diag: total calls to schedule.contains
+    pub schedule_contains_true: AtomicU64,  // diag: count where contains returned true
 }
 
 impl BenchCounters {
@@ -38,6 +40,8 @@ impl BenchCounters {
             send_event_queue_full: self.send_event_queue_full.load(Ordering::Relaxed),
             final_queue_full: self.final_queue_full.load(Ordering::Relaxed),
             blockhash_expired: self.blockhash_expired.load(Ordering::Relaxed),
+            schedule_contains_calls: self.schedule_contains_calls.load(Ordering::Relaxed),
+            schedule_contains_true: self.schedule_contains_true.load(Ordering::Relaxed),
         }
     }
 }
@@ -57,6 +61,8 @@ pub struct CounterSnapshot {
     pub send_event_queue_full: u64,
     pub final_queue_full: u64,
     pub blockhash_expired: u64,
+    pub schedule_contains_calls: u64,
+    pub schedule_contains_true: u64,
 }
 
 impl CounterSnapshot {
@@ -82,6 +88,8 @@ impl CounterSnapshot {
         d!("send_event_queue_full", send_event_queue_full);
         d!("final_queue_full", final_queue_full);
         d!("blockhash_expired", blockhash_expired);
+        d!("schedule_contains_calls", schedule_contains_calls);
+        d!("schedule_contains_true", schedule_contains_true);
         out
     }
 }

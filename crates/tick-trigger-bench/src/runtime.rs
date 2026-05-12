@@ -94,6 +94,20 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
         schedule_inner.insert((e.slot, e.tick));
     }
     let schedule_set: Arc<std::collections::HashSet<(u64, u8)>> = Arc::new(schedule_inner);
+
+    // DIAG: dump HashSet contents to verify it matches schedule.json
+    {
+        let mut entries: Vec<(u64, u8)> = schedule_set.iter().copied().collect();
+        entries.sort();
+        let dump_path = run_dir.join("schedule-hashset-dump.json");
+        let dump: Vec<serde_json::Value> = entries.iter()
+            .map(|(s, t)| serde_json::json!({"slot": s, "tick": t}))
+            .collect();
+        if let Ok(json) = serde_json::to_string_pretty(&dump) {
+            let _ = std::fs::write(&dump_path, json);
+            info!(?dump_path, hashset_size = entries.len(), "schedule HashSet dumped");
+        }
+    }
     let schedule_arc = Arc::new(schedule.entries.clone());
 
     let helius = Arc::new(HeliusSender::new(
@@ -275,6 +289,8 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
         preparer_signing_fail = snap.preparer_signing_fail,
         fork_tick_overflow = snap.fork_tick_overflow,
         rpc_fallback_error = snap.rpc_fallback_error,
+        schedule_contains_calls = snap.schedule_contains_calls,
+        schedule_contains_true = snap.schedule_contains_true,
         "final counters"
     );
 
