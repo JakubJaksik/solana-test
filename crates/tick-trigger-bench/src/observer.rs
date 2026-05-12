@@ -26,6 +26,10 @@ struct SlotState {
     tick_idx: u8,
     /// Cumulative num_hashes since the last valid tick.
     hash_count: u64,
+    /// Cumulative num_hashes since the start of the slot. Never reset by
+    /// tick detection — used to record sub-tick (hash-level) position of
+    /// the entry where our tx signature was observed.
+    cumulative_hashes_in_slot: u64,
     /// PoH entry hashes already processed for this slot. Prevents duplicate
     /// shred deliveries / fork-duplicate entries from inflating hash_count
     /// and pushing tick_idx past 64 (observed tick_idx=255 saturated in
@@ -50,6 +54,11 @@ pub struct MatchEvent {
     pub observed_slot: u64,
     pub observed_entry_index: u32,
     pub observed_tick_in_slot: Option<u8>,
+    /// Cumulative PoH hashes from the start of the observed_slot up to and
+    /// including the entry that contained the signature. Gives hash-level
+    /// (sub-tick) precision for the include position. None only if the
+    /// observer's slot_state had no entry for this slot (warmup or panic).
+    pub observed_cumulative_hashes_in_slot: Option<u64>,
 }
 
 pub struct ObserverConfig {
@@ -114,6 +123,9 @@ fn run_loop(cfg: ObserverConfig) {
                 // otherwise inflate hash_count and push tick_idx past 64
                 // (observed tick_idx=255 saturated in prod runs).
                 state.hash_count = state.hash_count.saturating_add(obs.num_hashes);
+                state.cumulative_hashes_in_slot = state
+                    .cumulative_hashes_in_slot
+                    .saturating_add(obs.num_hashes);
 
                 if obs.tx_count == 0 {
                     if state.hash_count == HASHES_PER_TICK {
@@ -167,12 +179,14 @@ fn run_loop(cfg: ObserverConfig) {
 
         for sig in &obs.signatures {
             if cfg.pending_sigs.contains(sig) {
+                let st = slot_state.get(&slot);
                 let ev = MatchEvent {
                     signature: *sig,
                     observed_at,
                     observed_slot: slot,
                     observed_entry_index: obs.entry_index,
-                    observed_tick_in_slot: slot_state.get(&slot).map(|s| s.tick_idx),
+                    observed_tick_in_slot: st.map(|s| s.tick_idx),
+                    observed_cumulative_hashes_in_slot: st.map(|s| s.cumulative_hashes_in_slot),
                 };
                 if cfg.match_queue.try_send(ev).is_err() {
                     cfg.counters.inc(&cfg.counters.match_queue_full);

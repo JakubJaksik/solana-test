@@ -192,10 +192,16 @@ fn schema() -> Arc<Schema> {
         Field::new("observed_slot", DataType::UInt64, true),
         Field::new("observed_entry_index", DataType::UInt32, true),
         Field::new("observed_tick_in_slot", DataType::UInt8, true),
+        // Cumulative PoH hashes from start of observed_slot up to the entry
+        // containing our tx (hash-level / sub-tick resolution).
+        Field::new("observed_cumulative_hashes_in_slot", DataType::UInt64, true),
         Field::new("observed_leader", DataType::FixedSizeBinary(32), true),
         Field::new("tick_delta", DataType::UInt32, true),
         Field::new("slot_delta", DataType::UInt32, true),
         Field::new("time_delta_ns", DataType::UInt64, true),
+        // Hash-precise distance from trigger (= schedule_tick × 62500) to
+        // include (= observed_cumulative_hashes_in_slot + slot_delta × 64 × 62500).
+        Field::new("hash_delta", DataType::UInt64, true),
         Field::new("leader_changed", DataType::Boolean, true),
         Field::new("status", DataType::Utf8, false),
     ]))
@@ -215,10 +221,12 @@ struct Builders {
     observed_slot: UInt64Builder,
     observed_entry_index: UInt32Builder,
     observed_tick_in_slot: UInt8Builder,
+    observed_cumulative_hashes_in_slot: UInt64Builder,
     observed_leader: FixedSizeBinaryBuilder,
     tick_delta: UInt32Builder,
     slot_delta: UInt32Builder,
     time_delta_ns: UInt64Builder,
+    hash_delta: UInt64Builder,
     leader_changed: BooleanBuilder,
     status: StringBuilder,
 }
@@ -239,10 +247,12 @@ impl Builders {
             observed_slot: UInt64Builder::with_capacity(cap),
             observed_entry_index: UInt32Builder::with_capacity(cap),
             observed_tick_in_slot: UInt8Builder::with_capacity(cap),
+            observed_cumulative_hashes_in_slot: UInt64Builder::with_capacity(cap),
             observed_leader: FixedSizeBinaryBuilder::with_capacity(cap, 32),
             tick_delta: UInt32Builder::with_capacity(cap),
             slot_delta: UInt32Builder::with_capacity(cap),
             time_delta_ns: UInt64Builder::with_capacity(cap),
+            hash_delta: UInt64Builder::with_capacity(cap),
             leader_changed: BooleanBuilder::with_capacity(cap),
             status: StringBuilder::with_capacity(cap, cap * 16),
         }
@@ -277,6 +287,10 @@ impl Builders {
                 Some(t) => self.observed_tick_in_slot.append_value(t),
                 None => self.observed_tick_in_slot.append_null(),
             }
+            match m.observed_cumulative_hashes_in_slot {
+                Some(h) => self.observed_cumulative_hashes_in_slot.append_value(h),
+                None => self.observed_cumulative_hashes_in_slot.append_null(),
+            }
             match leader_cache.lookup(m.observed_slot) {
                 Some(b) => self.observed_leader.append_value(b).unwrap(),
                 None => self.observed_leader.append_null(),
@@ -292,6 +306,21 @@ impl Builders {
             self.slot_delta.append_value(slot_diff as u32);
             let time_delta = m.observed_at.duration_since(s.send_at).as_nanos() as u64;
             self.time_delta_ns.append_value(time_delta);
+            // Hash-precise distance: trigger sits exactly on tick boundary
+            // (schedule_tick × 62500 hashes into the slot); include sits at
+            // observed_cumulative_hashes_in_slot in the observed slot. Add
+            // slot_diff × HASHES_PER_SLOT for cross-slot inclusion.
+            const HASHES_PER_SLOT: u64 = 64 * 62_500;
+            let hash_delta = m.observed_cumulative_hashes_in_slot.map(|obs_h| {
+                let trigger_h = s.schedule_tick as u64 * 62_500;
+                slot_diff.saturating_mul(HASHES_PER_SLOT)
+                    .saturating_add(obs_h)
+                    .saturating_sub(trigger_h)
+            });
+            match hash_delta {
+                Some(hd) => self.hash_delta.append_value(hd),
+                None => self.hash_delta.append_null(),
+            }
             let leader_changed = leader_cache.lookup(s.schedule_slot)
                 .zip(leader_cache.lookup(m.observed_slot))
                 .map(|(a, b)| a != b);
@@ -304,10 +333,12 @@ impl Builders {
             self.observed_slot.append_null();
             self.observed_entry_index.append_null();
             self.observed_tick_in_slot.append_null();
+            self.observed_cumulative_hashes_in_slot.append_null();
             self.observed_leader.append_null();
             self.tick_delta.append_null();
             self.slot_delta.append_null();
             self.time_delta_ns.append_null();
+            self.hash_delta.append_null();
             self.leader_changed.append_null();
         }
         self.status.append_value(r.status);
@@ -327,10 +358,12 @@ impl Builders {
             Arc::new(self.observed_slot.finish()),
             Arc::new(self.observed_entry_index.finish()),
             Arc::new(self.observed_tick_in_slot.finish()),
+            Arc::new(self.observed_cumulative_hashes_in_slot.finish()),
             Arc::new(self.observed_leader.finish()),
             Arc::new(self.tick_delta.finish()),
             Arc::new(self.slot_delta.finish()),
             Arc::new(self.time_delta_ns.finish()),
+            Arc::new(self.hash_delta.finish()),
             Arc::new(self.leader_changed.finish()),
             Arc::new(self.status.finish()),
         ];
@@ -451,6 +484,7 @@ mod tests {
             signature: sig, observed_at: Instant::now(),
             observed_slot: 101, observed_entry_index: 3,
             observed_tick_in_slot: Some(10),
+            observed_cumulative_hashes_in_slot: Some(10 * 62_500),
         }).unwrap();
 
         let rec = final_rx.recv_timeout(Duration::from_secs(2)).unwrap();
