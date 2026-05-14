@@ -3500,6 +3500,7 @@ dependencies = [
  "hostname",
  "humantime",
  "mimalloc",
+ "parking_lot 0.12.5",
  "parquet",
  "pretty_assertions",
  "rand 0.8.6",
@@ -3509,6 +3510,7 @@ dependencies = [
  "sha2 0.10.9",
  "smallvec",
  "solana-client",
+ "solana-commitment-config",
  "solana-compute-budget-interface",
  "solana-sdk",
  "solana-system-interface 3.2.0",
@@ -3517,6 +3519,8 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "yellowstone-grpc-client",
+ "yellowstone-grpc-proto",
 ]
 
 [[package]]
