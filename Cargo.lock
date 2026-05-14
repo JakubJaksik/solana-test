@@ -3477,6 +3477,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "fan-out-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "arrow",
+ "arrow-array",
+ "arrow-schema",
+ "async-trait",
+ "base64 0.22.1",
+ "bincode",
+ "bs58",
+ "chrono",
+ "clap",
+ "core_affinity",
+ "crossbeam-channel",
+ "dashmap 6.1.0",
+ "entry-sources",
+ "futures-util",
+ "hex",
+ "hostname",
+ "humantime",
+ "mimalloc",
+ "parquet",
+ "pretty_assertions",
+ "rand 0.8.6",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "smallvec",
+ "solana-client",
+ "solana-compute-budget-interface",
+ "solana-sdk",
+ "solana-system-interface 3.2.0",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fast-math"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11290,6 +11333,7 @@ dependencies = [
  "crossbeam-channel",
  "dashmap 6.1.0",
  "entry-sources",
+ "futures-util",
  "hostname",
  "humantime",
  "mimalloc",

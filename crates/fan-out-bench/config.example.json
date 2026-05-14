@@ -1,0 +1,46 @@
+{
+  "run": {
+    "wallet_keypair_path": "~/.config/solana/dex-bench.json",
+    "output_dir": "runs",
+    "schedule_seed": null,
+    "chunk_size_slots": 1000,
+    "min_balance_lamports": 1500000,
+    "priority_fee_microlamports": 5000,
+    "compute_unit_limit": 200000,
+    "observation_deadline_secs": 90,
+    "core_pinning": "ss_grpc=2,ys_grpc=3,merger=4,observer=5,preparer=6,matcher=7,writer=8"
+  },
+  "sources": {
+    "shredstream_grpc_url": "http://127.0.0.1:9999",
+    "yellowstone_grpc_url": "http://localhost:10000",
+    "yellowstone_auth_token": null,
+    "helius_rpc_url": "https://api.mainnet.solana.com"
+  },
+  "nonce": {
+    "config_path": "nonce-config.json",
+    "keypairs_path": "nonce-keypairs.json",
+    "pool_size": 150
+  },
+  "senders": [
+    {
+      "id": 0,
+      "name": "mock-a",
+      "kind": "mock",
+      "endpoint_url": "mock://localhost",
+      "region": "fra",
+      "auth": { "type": "none" },
+      "tip_lamports": 1000,
+      "enabled": true
+    },
+    {
+      "id": 1,
+      "name": "mock-b",
+      "kind": "mock",
+      "endpoint_url": "mock://localhost",
+      "region": "ams",
+      "auth": { "type": "none" },
+      "tip_lamports": 1000,
+      "enabled": true
+    }
+  ]
+}

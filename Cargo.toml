@@ -6,6 +6,7 @@ members = [
     "crates/entry-sources",
     "crates/entry-comparator",
     "crates/tick-trigger-bench",
+    "crates/fan-out-bench",
 ]
 
 [workspace.package]

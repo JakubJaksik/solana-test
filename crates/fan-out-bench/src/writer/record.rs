@@ -1,0 +1,151 @@
+//! FinalRecord — in-memory representation of one parquet row.
+
+use crate::outcome::{CommitmentAtResolution, FinalStatus, ObservedSource, RateLimitState, TentativeOutcome};
+use solana_sdk::{hash::Hash, pubkey::Pubkey, signature::Signature};
+
+#[derive(Debug, Clone)]
+pub struct FinalRecord {
+    pub trigger_slot: u64,
+    pub trigger_tick: u8,
+    pub trigger_id: [u8; 16],
+    pub nonce_account_id: u16,
+    pub nonce_blockhash_used: Hash,
+    pub sender_id: u8,
+    pub sender_name: String,
+    pub tx_signature: Signature,
+    pub tx_message_hash: [u8; 32],
+
+    pub endpoint_url: String,
+    pub protocol: String,
+    pub auth_tier: Option<String>,
+    pub tip_account_used: Option<Pubkey>,
+    pub tip_lamports: u64,
+    pub priority_fee_microlamports: u64,
+    pub compute_unit_limit: u32,
+
+    pub prepared_at_ns: u64,
+    pub pool_ready_at_ns: u64,
+    pub trigger_observed_at_ns: u64,
+    pub send_at_ns: u64,
+    pub send_ack_at_ns: Option<u64>,
+    pub send_order_in_trigger: u8,
+    pub host_clock_offset_ns: Option<i64>,
+
+    pub send_error: Option<String>,
+    pub rpc_err_code: Option<i32>,
+    pub rpc_err_message: Option<String>,
+    pub provider_request_id: Option<String>,
+    pub http_status: Option<u16>,
+    pub rate_limit_state: RateLimitState,
+
+    pub observed_slot: Option<u64>,
+    pub observed_entry_index: Option<u32>,
+    pub observed_tick_in_slot: Option<u8>,
+    pub observed_cumulative_hashes_in_slot: Option<u64>,
+    pub ss_observed_at_ns: Option<u64>,
+    pub ys_observed_at_ns: Option<u64>,
+    pub observed_at_ns: Option<u64>,
+    pub observed_source: Option<ObservedSource>,
+    pub commitment_at_resolution: Option<CommitmentAtResolution>,
+
+    pub tentative_outcome: TentativeOutcome,
+    pub final_status: FinalStatus,
+    pub siblings_resolved_at_ns: Option<u64>,
+
+    pub leader_pubkey: Option<Pubkey>,
+    pub leader_region_cc: Option<String>,
+    pub leader_dc_label: Option<String>,
+    pub leader_continent: Option<String>,
+    pub leader_stake_lamports: Option<u64>,
+    pub validator_client: Option<String>,
+
+    pub tick_delta: Option<i32>,
+    pub hash_delta: Option<i64>,
+    pub slot_delta: Option<i32>,
+    pub leader_changed: bool,
+    pub wall_trigger_to_send_ns: Option<i64>,
+    pub wall_send_rtt_ns: Option<i64>,
+    pub wall_send_to_observed_ns: Option<i64>,
+    pub wall_send_to_ss_observed_ns: Option<i64>,
+    pub wall_send_to_ys_observed_ns: Option<i64>,
+
+    pub nonce_update_observed_at_ns: Option<u64>,
+    pub nonce_update_source: Option<String>,
+    pub nonce_advanced_to_slot: Option<u64>,
+
+    pub run_id: String,
+    pub chunk_index: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn final_record_can_be_constructed() {
+        let r = FinalRecord {
+            trigger_slot: 100,
+            trigger_tick: 5,
+            trigger_id: [0; 16],
+            nonce_account_id: 0,
+            nonce_blockhash_used: Hash::default(),
+            sender_id: 1,
+            sender_name: "mock".into(),
+            tx_signature: Signature::default(),
+            tx_message_hash: [0; 32],
+            endpoint_url: "mock://x".into(),
+            protocol: "MOCK".into(),
+            auth_tier: None,
+            tip_account_used: None,
+            tip_lamports: 1000,
+            priority_fee_microlamports: 5000,
+            compute_unit_limit: 200_000,
+            prepared_at_ns: 1,
+            pool_ready_at_ns: 2,
+            trigger_observed_at_ns: 3,
+            send_at_ns: 4,
+            send_ack_at_ns: Some(5),
+            send_order_in_trigger: 0,
+            host_clock_offset_ns: None,
+            send_error: None,
+            rpc_err_code: None,
+            rpc_err_message: None,
+            provider_request_id: None,
+            http_status: Some(200),
+            rate_limit_state: RateLimitState::Ok,
+            observed_slot: None,
+            observed_entry_index: None,
+            observed_tick_in_slot: None,
+            observed_cumulative_hashes_in_slot: None,
+            ss_observed_at_ns: None,
+            ys_observed_at_ns: None,
+            observed_at_ns: None,
+            observed_source: None,
+            commitment_at_resolution: None,
+            tentative_outcome: TentativeOutcome::SendError,
+            final_status: FinalStatus::Pending,
+            siblings_resolved_at_ns: None,
+            leader_pubkey: None,
+            leader_region_cc: None,
+            leader_dc_label: None,
+            leader_continent: None,
+            leader_stake_lamports: None,
+            validator_client: None,
+            tick_delta: None,
+            hash_delta: None,
+            slot_delta: None,
+            leader_changed: false,
+            wall_trigger_to_send_ns: None,
+            wall_send_rtt_ns: None,
+            wall_send_to_observed_ns: None,
+            wall_send_to_ss_observed_ns: None,
+            wall_send_to_ys_observed_ns: None,
+            nonce_update_observed_at_ns: None,
+            nonce_update_source: None,
+            nonce_advanced_to_slot: None,
+            run_id: "test".into(),
+            chunk_index: 0,
+        };
+        assert_eq!(r.trigger_slot, 100);
+    }
+}
