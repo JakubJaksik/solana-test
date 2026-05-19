@@ -56,6 +56,8 @@ pub fn spawn(cfg: ObserverConfig) -> std::io::Result<JoinHandle<()>> {
 fn run_loop(cfg: ObserverConfig) {
     let mut slot_states: HashMap<u64, SlotState> = HashMap::with_capacity(64);
     let mut last_eviction = Instant::now();
+    let mut first_entry_logged = false;
+    let mut last_slot_log = Instant::now();
 
     loop {
         if cfg.stop.load(Ordering::Relaxed) {
@@ -70,12 +72,35 @@ fn run_loop(cfg: ObserverConfig) {
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         };
 
+        if !first_entry_logged {
+            first_entry_logged = true;
+            tracing::info!(
+                slot = merged.observation.slot,
+                source = ?merged.first_seen_source,
+                "MILESTONE: first entry observed"
+            );
+        }
+
         process_entry(&merged, &mut slot_states, &cfg);
         let current = cfg.current_slot.load(Ordering::Relaxed);
         if merged.observation.slot > current {
             cfg.current_slot
                 .store(merged.observation.slot, Ordering::Relaxed);
         }
+
+        // Periodic slot log so user sees observer is alive
+        if last_slot_log.elapsed() >= std::time::Duration::from_secs(5) {
+            last_slot_log = Instant::now();
+            let cur = cfg.current_slot.load(Ordering::Relaxed);
+            let schedule_len = cfg.schedule.load().len();
+            tracing::info!(
+                current_slot = cur,
+                tracked_slots = slot_states.len(),
+                schedule_entries = schedule_len,
+                "observer alive"
+            );
+        }
+
         maybe_evict_old_slots(&mut slot_states, &cfg.current_slot, &mut last_eviction);
     }
 }

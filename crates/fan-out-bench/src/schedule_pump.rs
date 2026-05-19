@@ -32,6 +32,8 @@ pub fn spawn(cfg: PumpConfig) -> std::io::Result<JoinHandle<()>> {
 
 fn run_loop(mut cfg: PumpConfig) {
     let mut buffered: Vec<ScheduleEntry> = Vec::new();
+    let mut sent_count: u64 = 0;
+    let mut last_status_log = std::time::Instant::now();
     loop {
         if cfg.stop.load(Ordering::Relaxed) {
             break;
@@ -43,11 +45,14 @@ fn run_loop(mut cfg: PumpConfig) {
             tracing::info!(
                 chunk_index = cfg.schedule.current_chunk_index,
                 size = buffered.len(),
+                first_slot = buffered.first().map(|e| e.slot),
+                last_slot = buffered.last().map(|e| e.slot),
                 "schedule-pump generated chunk"
             );
         }
 
         let lead_cutoff = current + cfg.lead_slots;
+        let buffered_before = buffered.len();
         while let Some(entry) = buffered.first() {
             if entry.slot > lead_cutoff && current > 0 {
                 break;
@@ -57,6 +62,21 @@ fn run_loop(mut cfg: PumpConfig) {
                 tracing::warn!("schedule_tx closed, schedule-pump exiting");
                 return;
             }
+            sent_count += 1;
+        }
+
+        if last_status_log.elapsed() >= Duration::from_secs(5) {
+            last_status_log = std::time::Instant::now();
+            let next_slot = buffered.first().map(|e| e.slot);
+            tracing::info!(
+                current_slot = current,
+                lead_cutoff,
+                buffered_remaining = buffered.len(),
+                drained_last_loop = buffered_before - buffered.len(),
+                next_buffered_slot = next_slot,
+                total_sent = sent_count,
+                "schedule-pump status"
+            );
         }
 
         std::thread::sleep(Duration::from_millis(50));

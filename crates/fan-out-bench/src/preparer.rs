@@ -52,10 +52,25 @@ pub fn spawn(cfg: PreparerConfig) -> (std::io::Result<JoinHandle<()>>, crossbeam
 fn run_loop(cfg: PreparerConfig, prepared_tx: crossbeam_channel::Sender<PreparedTrigger>) {
     use solana_sdk::signer::Signer;
     let authority_pubkey = cfg.authority.pubkey();
+    let mut total_prepared: u64 = 0;
+    let mut total_signed: u64 = 0;
+    let mut last_status = std::time::Instant::now();
     loop {
         if cfg.stop.load(Ordering::Relaxed) {
             break;
         }
+
+        if last_status.elapsed() >= std::time::Duration::from_secs(5) {
+            last_status = std::time::Instant::now();
+            tracing::info!(
+                total_prepared,
+                total_signed,
+                nonce_ready = cfg.nonce_manager.ready_count(),
+                nonce_total = cfg.nonce_manager.len(),
+                "preparer status"
+            );
+        }
+
         let entry = match cfg.schedule_rx.recv_timeout(std::time::Duration::from_millis(200)) {
             Ok(e) => e,
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
@@ -66,6 +81,7 @@ fn run_loop(cfg: PreparerConfig, prepared_tx: crossbeam_channel::Sender<Prepared
             cfg.counters.nonce_stalls.fetch_add(1, Ordering::Relaxed);
             continue;
         };
+        total_prepared += 1;
 
         let prepared_at = Instant::now();
         let mut signed_count = 0;
@@ -102,6 +118,7 @@ fn run_loop(cfg: PreparerConfig, prepared_tx: crossbeam_channel::Sender<Prepared
                     };
                     cfg.pool.insert(entry.slot, entry.tick, sender.id, pre);
                     signed_count += 1;
+                    total_signed += 1;
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, sender = %sender.name, "build_variant failed");

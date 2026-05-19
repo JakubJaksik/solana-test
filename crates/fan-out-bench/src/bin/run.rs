@@ -190,7 +190,22 @@ fn main() -> Result<()> {
     let run_id = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
     let output_dir = config.run.output_dir.join(&run_id);
     std::fs::create_dir_all(&output_dir)?;
-    tracing::info!(?output_dir, "run output directory");
+
+    let sender_names: Vec<&str> = senders.values().map(|s| s.name()).collect();
+    tracing::info!(
+        run_id = %run_id,
+        start_slot,
+        nonce_pool = nonce_manager.len(),
+        senders = ?sender_names,
+        sender_count = senders.len(),
+        chunk_size_slots = config.run.chunk_size_slots,
+        min_balance_lamports = config.run.min_balance_lamports,
+        observation_deadline_secs = config.run.observation_deadline_secs,
+        priority_fee_microlamports = config.run.priority_fee_microlamports,
+        compute_unit_limit = config.run.compute_unit_limit,
+        ?output_dir,
+        "=== FAN-OUT-BENCH RUN START ==="
+    );
 
     let handles = start_runtime(RuntimeInputs {
         config: config.clone(),
@@ -214,17 +229,41 @@ fn main() -> Result<()> {
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
     })?;
 
+    let mut last_full = std::time::Instant::now();
+    let mut prev_snap = handles.counters.snapshot();
     while !handles.stop.load(std::sync::atomic::Ordering::Relaxed) {
-        std::thread::sleep(std::time::Duration::from_secs(5));
+        std::thread::sleep(std::time::Duration::from_secs(2));
         let snap = handles.counters.snapshot();
+
+        // diff vs previous tick (delta per 2s window)
+        let d_sched_calls = snap.schedule_contains_calls.saturating_sub(prev_snap.schedule_contains_calls);
+        let d_sched_hits = snap.schedule_contains_true.saturating_sub(prev_snap.schedule_contains_true);
+        let d_send_err = snap.send_http_error.saturating_sub(prev_snap.send_http_error);
+        let d_429 = snap.send_throttled_429.saturating_sub(prev_snap.send_throttled_429);
+        let d_final_conf = snap.finality_confirmed.saturating_sub(prev_snap.finality_confirmed);
+        let d_nonce_stall = snap.nonce_stalls.saturating_sub(prev_snap.nonce_stalls);
+        let d_pool_empty = snap.pool_empty.saturating_sub(prev_snap.pool_empty);
+        let d_fork = snap.fork_tick_overflow.saturating_sub(prev_snap.fork_tick_overflow);
+
         tracing::info!(
-            pool_empty = snap.pool_empty,
-            send_http_error = snap.send_http_error,
-            send_throttled_429 = snap.send_throttled_429,
-            finality_confirmed = snap.finality_confirmed,
-            "counters snapshot"
+            // deltas in last 2s
+            "Δ2s: sched_hits={} sends_err={} 429={} fin_conf={} nonce_stall={} pool_empty={} fork={} | totals: sched_hits={}/{} send_err={} 429={} fin_conf={}",
+            d_sched_hits, d_send_err, d_429, d_final_conf, d_nonce_stall, d_pool_empty, d_fork,
+            snap.schedule_contains_true, snap.schedule_contains_calls,
+            snap.send_http_error, snap.send_throttled_429, snap.finality_confirmed,
         );
+
+        // Every 10s emit fuller snapshot
+        if last_full.elapsed() >= std::time::Duration::from_secs(10) {
+            last_full = std::time::Instant::now();
+            tracing::info!(
+                ?snap,
+                "full counters snapshot",
+            );
+        }
+        prev_snap = snap;
     }
-    tracing::info!("shutdown complete");
+    let final_snap = handles.counters.snapshot();
+    tracing::info!(?final_snap, "shutdown — final counters");
     Ok(())
 }
