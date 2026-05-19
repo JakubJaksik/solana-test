@@ -29,8 +29,8 @@ Skopiuj `config.example.json` do `smoke-config.json` i dostosuj:
 ```bash
 cargo build --release -p fan-out-bench
 ./target/release/setup_nonces \
-  --rpc-url <HELIUS_RPC_URL> \
-  --wallet ~/.config/solana/dex-bench.json \
+  --rpc-url https://api.mainnet.solana.com \
+  --wallet ~/solana-test/wallet.json \
   --count 5 \
   --output-keypairs nonce-keypairs.json \
   --output-config nonce-config.json
