@@ -60,8 +60,19 @@ Plan 5 — real-chain wiring:
 - ✅ Real SS + YS gRPC client wiring in `run` binary
 - ✅ Smoke runbook (`docs/smoke-runbook.md`)
 
+Plan 6 — REST senders complete:
+- ✅ Shared `parse_jsonrpc_or_text` helper for JSON-RPC senders
+- ✅ NozomiSender (JSON-RPC + ?c=<key>)
+- ✅ Slot0Sender (HTTPS JSON-RPC + ?api-key=<key>, multi-region)
+- ✅ BloxrouteSender (custom JSON body + Authorization header)
+- ✅ AstralaneSender (HTTP plaintext /iris2)
+- ✅ SyncroSender (JSON-RPC + Bearer/X-Api-Key)
+- ✅ TritonSender (path token auth, no vendor tip)
+- ✅ JitoBundleSender (sendBundle method, separate sender_id)
+- ✅ Helius swqos_only as separate sender_id (via config)
+- ✅ Extended config example with 10 sender variants
+
 Not yet implemented (later plans):
-- Plan 6: REST senders (Nozomi, 0slot, bloXroute, Astralane, Syncro, Triton)
 - Plan 6: gRPC/QUIC senders (BlockRazor, AllenHark, NextBlock, Harmonic)
 - Plan 7: Ops + polish (budget watcher, clock monitor, probe-senders, smoke harness)
 

@@ -65,6 +65,70 @@ fn main() -> Result<()> {
                 };
                 Arc::new(JitoSender::new(sc.id, sc.name.clone(), sc.endpoint_url.clone(), auth))
             }
+            SenderKind::Nozomi => {
+                let api_key = match &sc.auth {
+                    fan_out_bench::config::AuthConfig::QueryParam { value, .. } => value.clone(),
+                    _ => {
+                        tracing::warn!(name = %sc.name, "nozomi requires QueryParam auth, skipping");
+                        continue;
+                    }
+                };
+                Arc::new(fan_out_bench::senders::nozomi::NozomiSender::new(
+                    sc.id, sc.name.clone(), sc.endpoint_url.clone(), api_key,
+                ))
+            }
+            SenderKind::Slot0 => {
+                let api_key = match &sc.auth {
+                    fan_out_bench::config::AuthConfig::QueryParam { value, .. } => value.clone(),
+                    _ => { tracing::warn!(name = %sc.name, "0slot requires QueryParam auth, skipping"); continue; }
+                };
+                Arc::new(fan_out_bench::senders::slot0::Slot0Sender::new(
+                    sc.id, sc.name.clone(), sc.endpoint_url.clone(), api_key,
+                ))
+            }
+            SenderKind::Bloxroute => {
+                let auth = match &sc.auth {
+                    fan_out_bench::config::AuthConfig::Header { value, .. } => value.clone(),
+                    _ => { tracing::warn!(name = %sc.name, "bloxroute requires Header auth, skipping"); continue; }
+                };
+                Arc::new(fan_out_bench::senders::bloxroute::BloxrouteSender::new(
+                    sc.id, sc.name.clone(), sc.endpoint_url.clone(), auth,
+                ))
+            }
+            SenderKind::Astralane => {
+                let api_key = match &sc.auth {
+                    fan_out_bench::config::AuthConfig::QueryParam { value, .. } => value.clone(),
+                    _ => { tracing::warn!(name = %sc.name, "astralane requires QueryParam auth, skipping"); continue; }
+                };
+                Arc::new(fan_out_bench::senders::astralane::AstralaneSender::new(
+                    sc.id, sc.name.clone(), sc.endpoint_url.clone(), api_key,
+                ))
+            }
+            SenderKind::Syncro => {
+                let auth = match &sc.auth {
+                    fan_out_bench::config::AuthConfig::Bearer { token } => fan_out_bench::senders::syncro::SyncroAuth::Bearer(token.clone()),
+                    fan_out_bench::config::AuthConfig::Header { value, .. } => fan_out_bench::senders::syncro::SyncroAuth::XApiKey(value.clone()),
+                    fan_out_bench::config::AuthConfig::None => fan_out_bench::senders::syncro::SyncroAuth::None,
+                    _ => { tracing::warn!(name = %sc.name, "syncro requires Bearer/Header/None auth, skipping"); continue; }
+                };
+                Arc::new(fan_out_bench::senders::syncro::SyncroSender::new(
+                    sc.id, sc.name.clone(), sc.endpoint_url.clone(), auth,
+                ))
+            }
+            SenderKind::Triton => {
+                Arc::new(fan_out_bench::senders::triton::TritonSender::new(
+                    sc.id, sc.name.clone(), sc.endpoint_url.clone(),
+                ))
+            }
+            SenderKind::JitoBundle => {
+                let auth = match &sc.auth {
+                    fan_out_bench::config::AuthConfig::Header { value, .. } => Some(value.clone()),
+                    _ => None,
+                };
+                Arc::new(fan_out_bench::senders::jito_bundle::JitoBundleSender::new(
+                    sc.id, sc.name.clone(), sc.endpoint_url.clone(), auth,
+                ))
+            }
             _ => {
                 tracing::warn!(name = %sc.name, "sender kind not implemented yet, skipping");
                 continue;

@@ -24,23 +24,103 @@
   "senders": [
     {
       "id": 0,
-      "name": "mock-a",
-      "kind": "mock",
-      "endpoint_url": "mock://localhost",
+      "name": "helius-dual",
+      "kind": "helius",
+      "endpoint_url": "http://fra-sender.helius-rpc.com/fast",
+      "region": "fra",
+      "auth": { "type": "none" },
+      "tip_lamports": 200000,
+      "enabled": true
+    },
+    {
+      "id": 1,
+      "name": "helius-swqos",
+      "kind": "helius",
+      "endpoint_url": "http://fra-sender.helius-rpc.com/fast?swqos_only=true",
+      "region": "fra",
+      "auth": { "type": "none" },
+      "tip_lamports": 5000,
+      "enabled": false
+    },
+    {
+      "id": 2,
+      "name": "jito-fra-tx",
+      "kind": "jito",
+      "endpoint_url": "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/transactions",
       "region": "fra",
       "auth": { "type": "none" },
       "tip_lamports": 1000,
       "enabled": true
     },
     {
-      "id": 1,
-      "name": "mock-b",
-      "kind": "mock",
-      "endpoint_url": "mock://localhost",
-      "region": "ams",
+      "id": 3,
+      "name": "jito-fra-bundle",
+      "kind": "jito_bundle",
+      "endpoint_url": "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/bundles",
+      "region": "fra",
       "auth": { "type": "none" },
       "tip_lamports": 1000,
-      "enabled": true
+      "enabled": false
+    },
+    {
+      "id": 4,
+      "name": "nozomi-fra",
+      "kind": "nozomi",
+      "endpoint_url": "http://fra2.nozomi.temporal.xyz/",
+      "region": "fra",
+      "auth": { "type": "query_param", "key": "c", "value": "YOUR_NOZOMI_KEY" },
+      "tip_lamports": 1000000,
+      "enabled": false
+    },
+    {
+      "id": 5,
+      "name": "0slot-de",
+      "kind": "slot0",
+      "endpoint_url": "https://de.0slot.trade",
+      "region": "fra",
+      "auth": { "type": "query_param", "key": "api-key", "value": "YOUR_0SLOT_KEY" },
+      "tip_lamports": 100000,
+      "enabled": false
+    },
+    {
+      "id": 6,
+      "name": "bloxroute-fra",
+      "kind": "bloxroute",
+      "endpoint_url": "http://germany.solana.dex.blxrbdn.com/api/v2/submit",
+      "region": "fra",
+      "auth": { "type": "header", "name": "Authorization", "value": "YOUR_BLOXROUTE_AUTH" },
+      "tip_lamports": 1000000,
+      "enabled": false
+    },
+    {
+      "id": 7,
+      "name": "astralane-fra",
+      "kind": "astralane",
+      "endpoint_url": "http://fr.gateway.astralane.io/iris2",
+      "region": "fra",
+      "auth": { "type": "query_param", "key": "api-key", "value": "YOUR_ASTRALANE_KEY" },
+      "tip_lamports": 10000,
+      "enabled": false
+    },
+    {
+      "id": 8,
+      "name": "syncro-private",
+      "kind": "syncro",
+      "endpoint_url": "https://YOUR_SYNCRO_HOST/rpc",
+      "region": "fra",
+      "auth": { "type": "bearer", "token": "YOUR_SYNCRO_TOKEN" },
+      "tip_lamports": 1000000,
+      "enabled": false
+    },
+    {
+      "id": 9,
+      "name": "triton-mainnet",
+      "kind": "triton",
+      "endpoint_url": "https://YOUR_APP.mainnet.rpcpool.com/YOUR_SECRET_TOKEN",
+      "region": "fra",
+      "auth": { "type": "none" },
+      "tip_lamports": 0,
+      "enabled": false
     }
   ]
 }
