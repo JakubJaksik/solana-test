@@ -88,6 +88,10 @@ pub struct MatcherConfig {
     pub pinned_core: Option<usize>,
     pub counters: Arc<BenchCounters>,
     pub stop: Arc<AtomicBool>,
+    /// Optional NonceManager — when set, matcher calls on_observed_landing
+    /// after matching a sig so nonce transitions to AwaitingUpdate immediately
+    /// (faster recovery than waiting for YS account subscription).
+    pub nonce_manager: Option<Arc<crate::nonce::manager::NonceManager>>,
 }
 
 pub fn spawn(cfg: MatcherConfig) -> std::io::Result<JoinHandle<()>> {

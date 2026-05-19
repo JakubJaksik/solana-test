@@ -28,7 +28,9 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
     let args = Args::parse();
     let config = Config::load(&args.config).context("load config")?;
 
@@ -211,15 +213,63 @@ fn main() -> Result<()> {
         config: config.clone(),
         authority,
         authority_pubkey,
-        nonce_manager,
+        nonce_manager: nonce_manager.clone(),
         ss_entry_rx: ss_rx,
         ys_entry_rx: ys_rx,
         senders,
         output_dir,
         run_id,
-        rpc,
+        rpc: rpc.clone(),
         start_slot,
     })?;
+
+    // Start nonce Geyser subscription (live nonce advance notifications)
+    {
+        let manager = nonce_manager.clone();
+        let stop = handles.stop.clone();
+        let endpoint = config.sources.yellowstone_grpc_url.clone();
+        let token = config.sources.yellowstone_auth_token.clone();
+        std::thread::Builder::new()
+            .name("nonce-geyser".into())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to build nonce-geyser tokio runtime");
+                        return;
+                    }
+                };
+                if let Err(e) = rt.block_on(fan_out_bench::nonce::geyser_sub::run(
+                    fan_out_bench::nonce::geyser_sub::GeyserConfig {
+                        endpoint,
+                        auth_token: token,
+                        manager,
+                        stop,
+                    },
+                )) {
+                    tracing::error!(error = %e, "nonce geyser subscription exited");
+                }
+            })?;
+        tracing::info!("nonce geyser subscription started");
+    }
+
+    // Start nonce RPC fallback poller (stale recovery)
+    {
+        let manager = nonce_manager.clone();
+        let stop = handles.stop.clone();
+        let _ = fan_out_bench::nonce::rpc_poll::spawn(fan_out_bench::nonce::rpc_poll::RpcPollerConfig {
+            rpc: rpc.clone(),
+            manager,
+            poll_interval: std::time::Duration::from_secs(15),
+            in_flight_deadline: std::time::Duration::from_secs(45),
+            awaiting_update_deadline: std::time::Duration::from_secs(10),
+            stop,
+        })?;
+        tracing::info!("nonce rpc fallback poller started");
+    }
 
     tracing::info!("runtime started — bench is running. Ctrl-C to stop.");
 
@@ -236,7 +286,6 @@ fn main() -> Result<()> {
         let snap = handles.counters.snapshot();
 
         // diff vs previous tick (delta per 2s window)
-        let d_sched_calls = snap.schedule_contains_calls.saturating_sub(prev_snap.schedule_contains_calls);
         let d_sched_hits = snap.schedule_contains_true.saturating_sub(prev_snap.schedule_contains_true);
         let d_send_err = snap.send_http_error.saturating_sub(prev_snap.send_http_error);
         let d_429 = snap.send_throttled_429.saturating_sub(prev_snap.send_throttled_429);
