@@ -28,8 +28,13 @@ Plan 2 — nonce infrastructure:
 - ✅ setup_nonces binary (create N pool)
 - ✅ teardown_nonces binary (refund rent)
 
+Plan 3 — entry observation:
+- ✅ TriggerEvent type
+- ✅ EntryMerger (SS + YS dedup by (slot, entry_hash))
+- ✅ Observer (PoH tick counter + schedule match + trigger emit)
+- ✅ Integration test (mock stream → merger → observer → trigger)
+
 Not yet implemented (later plans):
-- Plan 3: SS+YS entry merger, Observer with PoH tick tracking
 - Plan 4: First real senders (Helius, Jito), Matcher state machine, Finality tracker, runtime wiring
 - Plan 5: REST senders (Nozomi, 0slot, bloXroute, Astralane, Syncro, Triton)
 - Plan 6: gRPC/QUIC senders (BlockRazor, AllenHark, NextBlock, Harmonic)
