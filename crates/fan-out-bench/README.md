@@ -72,9 +72,25 @@ Plan 6 — REST senders complete:
 - ✅ Helius swqos_only as separate sender_id (via config)
 - ✅ Extended config example with 10 sender variants
 
-Not yet implemented (later plans):
-- Plan 6: gRPC/QUIC senders (BlockRazor, AllenHark, NextBlock, Harmonic)
-- Plan 7: Ops + polish (budget watcher, clock monitor, probe-senders, smoke harness)
+Plan 7 — final senders + probe + polish:
+- ✅ AllenHarkSender (HTTPS REST, x-api-key optional)
+- ✅ NextBlockSender (HTTPS REST, Authorization header)
+- ✅ BlockRazorSender (HTTP v2 plaintext, ?auth= query param)
+- ✅ Probe-senders binary (per-sender compatibility check)
+- ✅ Config example covers all 13 sender configs
+- ✅ Smoke runbook updated with probe-senders section
+
+## v1 complete
+
+Bench jest **v1 production-ready**: uruchamialny na mainnet, multi-sender support, parquet output, finality tracking. 4 binaries: `setup_nonces`, `teardown_nonces`, `run`, `probe_senders`.
+
+NOT w v1 scope (potential v2):
+- AllenHark QUIC (`84.32.223.83:4433`) — needs Quinn integration
+- NextBlock QUIC (`frankfurt.nextblock.io:11100`) — needs Quinn
+- BlockRazor gRPC — needs tonic + proto setup
+- Harmonic gRPC bundle — closed beta, whitelist required
+- Clock monitor (NTP drift telemetry for parquet `host_clock_offset_ns`)
+- Probe-senders extension dla wszystkich sender kinds (obecnie tylko Helius + Jito)
 
 ## Reference
 

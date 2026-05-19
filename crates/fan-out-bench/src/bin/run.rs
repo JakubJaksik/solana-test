@@ -129,6 +129,34 @@ fn main() -> Result<()> {
                     sc.id, sc.name.clone(), sc.endpoint_url.clone(), auth,
                 ))
             }
+            SenderKind::AllenharkHttps => {
+                let api_key = match &sc.auth {
+                    fan_out_bench::config::AuthConfig::Header { value, .. } => Some(value.clone()),
+                    fan_out_bench::config::AuthConfig::None => None,
+                    _ => { tracing::warn!(name = %sc.name, "allenhark requires Header/None auth, skipping"); continue; }
+                };
+                Arc::new(fan_out_bench::senders::allenhark::AllenHarkSender::new(
+                    sc.id, sc.name.clone(), sc.endpoint_url.clone(), api_key,
+                ))
+            }
+            SenderKind::Nextblock => {
+                let auth = match &sc.auth {
+                    fan_out_bench::config::AuthConfig::Header { value, .. } => value.clone(),
+                    _ => { tracing::warn!(name = %sc.name, "nextblock requires Header auth, skipping"); continue; }
+                };
+                Arc::new(fan_out_bench::senders::nextblock::NextBlockSender::new(
+                    sc.id, sc.name.clone(), sc.endpoint_url.clone(), auth,
+                ))
+            }
+            SenderKind::BlockrazorHttp => {
+                let token = match &sc.auth {
+                    fan_out_bench::config::AuthConfig::QueryParam { value, .. } => value.clone(),
+                    _ => { tracing::warn!(name = %sc.name, "blockrazor requires QueryParam auth, skipping"); continue; }
+                };
+                Arc::new(fan_out_bench::senders::blockrazor::BlockRazorSender::new(
+                    sc.id, sc.name.clone(), sc.endpoint_url.clone(), token,
+                ))
+            }
             _ => {
                 tracing::warn!(name = %sc.name, "sender kind not implemented yet, skipping");
                 continue;

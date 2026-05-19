@@ -101,3 +101,19 @@ Oczekiwane:
 ```
 
 Refunduje locked rent (~0.0072 SOL przy N=5).
+
+## Pre-flight: probe-senders
+
+Przed pełnym benchem zwaliduj że każdy enabled sender przyjmuje naszą AdvanceNonce-first tx layout. `probe_senders` wysyła 5 zwykłych tx (bez durable nonce) per sender, czeka 30s, sprawdza landing rate.
+
+```bash
+./target/release/probe_senders --config smoke-config.json
+```
+
+**Note (Plan 7 limit):** v1 probe obsługuje tylko Helius i Jito kindy. Pozostali senderzy są flagged "kind not yet supported, skipping". Rozszerz match block w `bin/probe_senders.rs` dla pozostałych jeśli potrzebne.
+
+Verdict:
+- COMPATIBLE: ≥3/5 tx wylądowało → keep enabled w main bench
+- INCOMPATIBLE: ≤2/5 → disable w configu, sprawdź vendor docs / kontakt support
+
+Koszt probe ~5 tx × tip_lamports per sender — dla 2 senderów × 1M lamp tip = ~0.01 SOL.

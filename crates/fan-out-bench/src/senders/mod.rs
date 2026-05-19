@@ -1,11 +1,14 @@
 //! TxSender trait — uniform contract for all send mechanisms.
 
+pub mod allenhark;
 pub mod astralane;
+pub mod blockrazor;
 pub mod bloxroute;
 pub mod helius;
 pub mod jito;
 pub mod jito_bundle;
 pub mod mock;
+pub mod nextblock;
 pub mod nozomi;
 pub mod slot0;
 pub mod syncro;

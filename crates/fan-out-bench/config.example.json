@@ -121,6 +121,36 @@
       "auth": { "type": "none" },
       "tip_lamports": 0,
       "enabled": false
+    },
+    {
+      "id": 10,
+      "name": "allenhark-fra",
+      "kind": "allenhark_https",
+      "endpoint_url": "https://fra.relay.allenhark.com/v1/sendTx",
+      "region": "fra",
+      "auth": { "type": "none" },
+      "tip_lamports": 1000000,
+      "enabled": false
+    },
+    {
+      "id": 11,
+      "name": "nextblock-fra",
+      "kind": "nextblock",
+      "endpoint_url": "https://frankfurt.nextblock.io/api/v2/submit",
+      "region": "fra",
+      "auth": { "type": "header", "name": "Authorization", "value": "YOUR_NEXTBLOCK_KEY" },
+      "tip_lamports": 1000000,
+      "enabled": false
+    },
+    {
+      "id": 12,
+      "name": "blockrazor-fra",
+      "kind": "blockrazor_http",
+      "endpoint_url": "http://frankfurt.solana.blockrazor.xyz:443/v2/sendTransaction",
+      "region": "fra",
+      "auth": { "type": "query_param", "key": "auth", "value": "YOUR_BLOCKRAZOR_TOKEN" },
+      "tip_lamports": 1000000,
+      "enabled": false
     }
   ]
 }
