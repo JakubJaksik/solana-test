@@ -5,6 +5,7 @@
 
 use crate::attempt_state::AttemptState;
 use crate::counters::BenchCounters;
+use crate::finality_tracker::FinalityQueueEntry;
 use crate::match_event::MatchEvent;
 use crate::outcome::{FinalStatus, ObservedSource, RateLimitState, TentativeOutcome};
 use crate::trigger_id::TriggerId;
@@ -79,6 +80,7 @@ pub struct MatcherConfig {
     pub send_event_rx: Receiver<SendEvent>,
     pub match_event_rx: Receiver<MatchEvent>,
     pub final_tx: Sender<FinalRecord>,
+    pub finality_tx: Option<Sender<FinalityQueueEntry>>,
     pub pending_sigs: Arc<DashSet<Signature>>,
     pub deadline: Duration,
     pub run_id: String,
@@ -219,6 +221,14 @@ fn handle_match_event(
         if cfg.final_tx.try_send(record).is_err() {
             cfg.counters.final_queue_full.fetch_add(1, Ordering::Relaxed);
         }
+        if let Some(ftx) = &cfg.finality_tx {
+            let _ = ftx.send(FinalityQueueEntry {
+                trigger_id: rec.reg.trigger_id,
+                sender_id: rec.reg.sender_id,
+                signature: rec.reg.signature,
+                queued_at: Instant::now(),
+            });
+        }
         to_remove.push(key);
     }
     for key in to_remove {
@@ -245,6 +255,14 @@ fn sweep_deadlines(
             let record = build_record_from_record(&rec, cfg, TentativeOutcome::UnknownPending, None);
             if cfg.final_tx.try_send(record).is_err() {
                 cfg.counters.final_queue_full.fetch_add(1, Ordering::Relaxed);
+            }
+            if let Some(ftx) = &cfg.finality_tx {
+                let _ = ftx.send(FinalityQueueEntry {
+                    trigger_id: rec.reg.trigger_id,
+                    sender_id: rec.reg.sender_id,
+                    signature: rec.reg.signature,
+                    queued_at: Instant::now(),
+                });
             }
         }
     }
@@ -471,6 +489,7 @@ mod tests {
             send_event_rx: send_rx,
             match_event_rx: match_rx,
             final_tx,
+            finality_tx: None,
             pending_sigs: Arc::new(DashSet::new()),
             deadline: Duration::from_millis(200),
             run_id: "test".into(),

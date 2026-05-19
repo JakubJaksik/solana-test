@@ -42,6 +42,7 @@ fn matcher_to_parquet_emits_winner_and_siblings() {
         send_event_rx: send_rx,
         match_event_rx: match_rx,
         final_tx: final_tx.clone(),
+        finality_tx: None,
         pending_sigs: Arc::new(dashmap::DashSet::new()),
         deadline: Duration::from_secs(60),
         run_id: "pipeline-mock".into(),

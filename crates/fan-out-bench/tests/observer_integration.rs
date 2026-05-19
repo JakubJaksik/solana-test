@@ -50,7 +50,7 @@ fn ss_only_stream_drives_observer_to_fire_trigger() {
     let (match_tx_local, _match_rx_local) = crossbeam_channel::bounded::<fan_out_bench::match_event::MatchEvent>(100);
     let observer_handle = spawn_observer(ObserverConfig {
         merged_rx,
-        schedule: Arc::new(schedule),
+        schedule: Arc::new(arc_swap::ArcSwap::from_pointee(schedule)),
         trigger_tx,
         match_tx: match_tx_local,
         pending_sigs: Arc::new(dashmap::DashSet::new()),
@@ -97,7 +97,7 @@ fn dedup_when_both_sources_emit_same_entry_then_only_one_trigger() {
     let (match_tx_local, _match_rx_local) = crossbeam_channel::bounded::<fan_out_bench::match_event::MatchEvent>(100);
     let observer_handle = spawn_observer(ObserverConfig {
         merged_rx,
-        schedule: Arc::new(schedule),
+        schedule: Arc::new(arc_swap::ArcSwap::from_pointee(schedule)),
         trigger_tx,
         match_tx: match_tx_local,
         pending_sigs: Arc::new(dashmap::DashSet::new()),

@@ -7,6 +7,7 @@ use crate::counters::BenchCounters;
 use crate::match_event::MatchEvent;
 use crate::merger::MergedEntry;
 use crate::trigger::TriggerEvent;
+use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender};
 use dashmap::DashSet;
 use solana_sdk::hash::Hash;
@@ -31,7 +32,7 @@ struct SlotState {
 
 pub struct ObserverConfig {
     pub merged_rx: Receiver<MergedEntry>,
-    pub schedule: Arc<HashSet<(u64, u8)>>,
+    pub schedule: Arc<ArcSwap<HashSet<(u64, u8)>>>,
     pub trigger_tx: Sender<TriggerEvent>,
     pub match_tx: Sender<MatchEvent>,
     pub pending_sigs: Arc<DashSet<Signature>>,
@@ -106,7 +107,7 @@ fn process_entry(merged: &MergedEntry, states: &mut HashMap<u64, SlotState>, cfg
             cfg.counters
                 .schedule_contains_calls
                 .fetch_add(1, Ordering::Relaxed);
-            if cfg.schedule.contains(&(obs.slot, tick_now))
+            if cfg.schedule.load().contains(&(obs.slot, tick_now))
                 && state.fired_ticks.insert(tick_now)
             {
                 cfg.counters
@@ -215,7 +216,7 @@ mod tests {
         let current_slot = Arc::new(AtomicU64::new(0));
         let handle = spawn(ObserverConfig {
             merged_rx: in_rx,
-            schedule: Arc::new(schedule),
+            schedule: Arc::new(ArcSwap::from_pointee(schedule)),
             trigger_tx: out_tx,
             match_tx,
             pending_sigs: pending_sigs.clone(),

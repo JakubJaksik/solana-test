@@ -50,8 +50,18 @@ Plan 4 — pipeline + first senders:
 - ⏸ RPC fallback for UNKNOWN_PENDING (Plan 5)
 - ⏸ SS/YS gRPC client wiring in runtime (Plan 5)
 
+Plan 5 — real-chain wiring:
+- ✅ Schedule pump (chunked lazy generation → schedule_tx)
+- ✅ Budget watcher (periodic getBalance → stop on low balance)
+- ✅ Finality tracker (getSignatureStatuses(finalized) → finality-updates.jsonl)
+- ✅ RPC fallback (UNKNOWN_PENDING → TRULY_MISSING/recovered)
+- ✅ Matcher hook to finality queue
+- ✅ Observer schedule via ArcSwap (live updates from schedule pump)
+- ✅ Real SS + YS gRPC client wiring in `run` binary
+- ✅ Smoke runbook (`docs/smoke-runbook.md`)
+
 Not yet implemented (later plans):
-- Plan 5: REST senders (Nozomi, 0slot, bloXroute, Astralane, Syncro, Triton)
+- Plan 6: REST senders (Nozomi, 0slot, bloXroute, Astralane, Syncro, Triton)
 - Plan 6: gRPC/QUIC senders (BlockRazor, AllenHark, NextBlock, Harmonic)
 - Plan 7: Ops + polish (budget watcher, clock monitor, probe-senders, smoke harness)
 

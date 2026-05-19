@@ -2,6 +2,9 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use entry_sources::shredstream::ShredStreamGrpcSource;
+use entry_sources::yellowstone::YellowstoneSource;
+use entry_sources::{DropCounters, EntrySource};
 use fan_out_bench::config::{Config, SenderKind};
 use fan_out_bench::nonce::bootstrap::bootstrap;
 use fan_out_bench::nonce::manager::NonceManager;
@@ -30,10 +33,18 @@ fn main() -> Result<()> {
     let config = Config::load(&args.config).context("load config")?;
 
     let authority = Arc::new(load_keypair_file(&config.run.wallet_keypair_path).context("load wallet")?);
-    tracing::info!(authority = %authority.pubkey(), "fan-out-bench starting");
+    let authority_pubkey = authority.pubkey();
+    tracing::info!(authority = %authority_pubkey, "fan-out-bench starting");
 
-    let rpc = RpcClient::new_with_commitment(config.sources.helius_rpc_url.clone(), CommitmentConfig::confirmed());
-    let nonce_entries = bootstrap(&rpc, &config.nonce.config_path, &authority.pubkey()).context("bootstrap nonces")?;
+    let rpc = Arc::new(RpcClient::new_with_commitment(
+        config.sources.helius_rpc_url.clone(),
+        CommitmentConfig::confirmed(),
+    ));
+
+    let start_slot = rpc.get_slot().context("get_slot")?;
+    tracing::info!(start_slot, "current slot");
+
+    let nonce_entries = bootstrap(&rpc, &config.nonce.config_path, &authority_pubkey).context("bootstrap nonces")?;
     let nonce_manager = Arc::new(NonceManager::new(nonce_entries));
     tracing::info!(count = nonce_manager.len(), "nonce manager ready");
 
@@ -63,26 +74,47 @@ fn main() -> Result<()> {
     }
     tracing::info!(count = senders.len(), "senders configured");
 
-    let (_ss_tx_dummy, ss_rx) = crossbeam_channel::unbounded();
-    let (_ys_tx_dummy, ys_rx) = crossbeam_channel::unbounded();
+    let ss_counters = Arc::new(DropCounters::default());
+    let ss_src = Box::new(ShredStreamGrpcSource {
+        endpoint: config.sources.shredstream_grpc_url.clone(),
+        channel_capacity: 65536,
+        pinned_core: None,
+        counters: ss_counters.clone(),
+    });
+    let ss_rx = ss_src.start().context("start shredstream source")?;
+    tracing::info!("shredstream source started");
+
+    let ys_counters = Arc::new(DropCounters::default());
+    let ys_src = Box::new(YellowstoneSource {
+        url: config.sources.yellowstone_grpc_url.clone(),
+        token: config.sources.yellowstone_auth_token.clone(),
+        channel_capacity: 65536,
+        pinned_core: None,
+        counters: ys_counters.clone(),
+    });
+    let ys_rx = ys_src.start().context("start yellowstone source")?;
+    tracing::info!("yellowstone source started");
 
     let run_id = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
     let output_dir = config.run.output_dir.join(&run_id);
     std::fs::create_dir_all(&output_dir)?;
+    tracing::info!(?output_dir, "run output directory");
 
     let handles = start_runtime(RuntimeInputs {
         config: config.clone(),
         authority,
+        authority_pubkey,
         nonce_manager,
         ss_entry_rx: ss_rx,
         ys_entry_rx: ys_rx,
         senders,
         output_dir,
         run_id,
+        rpc,
+        start_slot,
     })?;
 
     tracing::info!("runtime started — bench is running. Ctrl-C to stop.");
-    tracing::warn!("NOTE: Plan 4 runtime — SS/YS gRPC clients not yet hooked. Bench will idle.");
 
     let stop = handles.stop.clone();
     ctrlc::set_handler(move || {
@@ -91,7 +123,15 @@ fn main() -> Result<()> {
     })?;
 
     while !handles.stop.load(std::sync::atomic::Ordering::Relaxed) {
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        let snap = handles.counters.snapshot();
+        tracing::info!(
+            pool_empty = snap.pool_empty,
+            send_http_error = snap.send_http_error,
+            send_throttled_429 = snap.send_throttled_429,
+            finality_confirmed = snap.finality_confirmed,
+            "counters snapshot"
+        );
     }
     tracing::info!("shutdown complete");
     Ok(())
