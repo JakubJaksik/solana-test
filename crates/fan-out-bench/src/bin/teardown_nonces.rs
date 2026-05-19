@@ -36,7 +36,8 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     let authority = load_keypair_file(&args.wallet).context("load wallet")?;
-    let kp_file_bytes = std::fs::read(&args.keypairs).context("read keypairs file")?;
+    let keypairs_path = fan_out_bench::wallet::expand_tilde(&args.keypairs);
+    let kp_file_bytes = std::fs::read(&keypairs_path).context("read keypairs file")?;
     let kp_file: NonceKeypairsFile = serde_json::from_slice(&kp_file_bytes).context("parse keypairs file")?;
 
     let nonce_kps: Vec<Keypair> = kp_file

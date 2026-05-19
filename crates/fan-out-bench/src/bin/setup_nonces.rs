@@ -56,6 +56,8 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     let authority = load_keypair_file(&args.wallet).context("load wallet")?;
+    let output_keypairs = fan_out_bench::wallet::expand_tilde(&args.output_keypairs);
+    let output_config = fan_out_bench::wallet::expand_tilde(&args.output_config);
     tracing::info!(authority = %authority.pubkey(), count = args.count, "setting up nonces");
 
     let client = RpcClient::new_with_commitment(args.rpc_url.clone(), CommitmentConfig::confirmed());
@@ -73,13 +75,13 @@ fn main() -> Result<()> {
             .collect(),
     };
     std::fs::write(
-        &args.output_keypairs,
+        &output_keypairs,
         serde_json::to_string_pretty(&kp_file)?,
     )?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&args.output_keypairs, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&output_keypairs, std::fs::Permissions::from_mode(0o600))?;
     }
     tracing::info!(path = ?args.output_keypairs, "keypairs saved");
 
@@ -134,7 +136,7 @@ fn main() -> Result<()> {
 
     let config_file = NonceConfigFile { accounts: entries };
     std::fs::write(
-        &args.output_config,
+        &output_config,
         serde_json::to_string_pretty(&config_file)?,
     )?;
     tracing::info!(path = ?args.output_config, count = args.count, "config saved");

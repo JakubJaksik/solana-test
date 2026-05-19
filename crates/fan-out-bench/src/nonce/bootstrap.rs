@@ -31,6 +31,8 @@ pub fn bootstrap(
     config_path: &Path,
     expected_authority: &Pubkey,
 ) -> Result<Vec<(NonceId, Pubkey, Hash)>> {
+    let config_path = crate::wallet::expand_tilde(config_path);
+    let config_path = config_path.as_path();
     let bytes = std::fs::read(config_path)
         .with_context(|| format!("read nonce config: {}", config_path.display()))?;
     let config: NonceConfigFile = serde_json::from_slice(&bytes).context("parse nonce config")?;

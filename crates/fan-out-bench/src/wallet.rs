@@ -10,7 +10,24 @@
 use anyhow::{bail, Context};
 use serde::Deserialize;
 use solana_sdk::signature::Keypair;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Expand `~/` prefix to `$HOME/`. No-op for paths that don't start with `~/`.
+pub fn expand_tilde(path: &Path) -> PathBuf {
+    if let Some(s) = path.to_str() {
+        if let Some(rest) = s.strip_prefix("~/") {
+            if let Ok(home) = std::env::var("HOME") {
+                return PathBuf::from(home).join(rest);
+            }
+        }
+        if s == "~" {
+            if let Ok(home) = std::env::var("HOME") {
+                return PathBuf::from(home);
+            }
+        }
+    }
+    path.to_path_buf()
+}
 
 #[derive(Deserialize)]
 struct ObjectFormat {
@@ -19,6 +36,8 @@ struct ObjectFormat {
 }
 
 pub fn load_keypair_file(path: &Path) -> anyhow::Result<Keypair> {
+    let path = expand_tilde(path);
+    let path = path.as_path();
     let bytes = std::fs::read(path)
         .with_context(|| format!("failed to read keypair file: {}", path.display()))?;
     let bytes_str = std::str::from_utf8(&bytes)
