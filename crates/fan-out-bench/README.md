@@ -34,8 +34,23 @@ Plan 3 — entry observation:
 - ✅ Observer (PoH tick counter + schedule match + trigger emit)
 - ✅ Integration test (mock stream → merger → observer → trigger)
 
+Plan 4 — pipeline + first senders:
+- ✅ HTTP JSON-RPC helper
+- ✅ HeliusSender (HTTP, with optional swqos_only + api-key)
+- ✅ JitoSender (single tx via /api/v1/transactions)
+- ✅ TriggerId hashing (slot + tick + nonce_id → 16-byte id)
+- ✅ MatchEvent + observer sig matching (pending_sigs DashSet)
+- ✅ Matcher state machine (single-owner per (TriggerId, sender_id))
+- ✅ Preparer (NonceManager + tx_builder + Pool integration)
+- ✅ Dispatcher (async fan-out, deterministic perm seed)
+- ✅ Runtime wiring (merger+observer+preparer+dispatcher+matcher+parquet)
+- ✅ `run` CLI binary (3rd bin, idle until SS/YS hookup)
+- ✅ Pipeline mock integration test (1 LANDED + 2 DEDUPED verified)
+- ⏸ Finality tracker (Plan 5)
+- ⏸ RPC fallback for UNKNOWN_PENDING (Plan 5)
+- ⏸ SS/YS gRPC client wiring in runtime (Plan 5)
+
 Not yet implemented (later plans):
-- Plan 4: First real senders (Helius, Jito), Matcher state machine, Finality tracker, runtime wiring
 - Plan 5: REST senders (Nozomi, 0slot, bloXroute, Astralane, Syncro, Triton)
 - Plan 6: gRPC/QUIC senders (BlockRazor, AllenHark, NextBlock, Harmonic)
 - Plan 7: Ops + polish (budget watcher, clock monitor, probe-senders, smoke harness)

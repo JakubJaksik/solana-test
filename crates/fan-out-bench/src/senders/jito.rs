@@ -1,0 +1,132 @@
+//! Jito Block Engine sender — single tx via /api/v1/transactions.
+
+use super::{SendOutcome, TxSender};
+use crate::http_jsonrpc::{build_http_client, build_send_transaction_body, tx_to_base64, JsonRpcResponse};
+use crate::outcome::RateLimitState;
+use solana_sdk::transaction::Transaction;
+use std::str::FromStr;
+use std::time::{Duration, Instant};
+
+pub struct JitoSender {
+    id: u8,
+    name: String,
+    endpoint: String,
+    auth_uuid: Option<String>,
+    client: reqwest::Client,
+}
+
+impl JitoSender {
+    pub fn new(
+        id: u8,
+        name: impl Into<String>,
+        endpoint: impl Into<String>,
+        auth_uuid: Option<String>,
+    ) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            endpoint: endpoint.into(),
+            auth_uuid,
+            client: build_http_client(Duration::from_secs(5)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TxSender for JitoSender {
+    fn id(&self) -> u8 { self.id }
+    fn name(&self) -> &str { &self.name }
+    fn endpoint_url(&self) -> &str { &self.endpoint }
+    fn protocol(&self) -> &'static str { "HTTP_JSONRPC" }
+
+    async fn send(&self, tx: &Transaction) -> SendOutcome {
+        let send_at = Instant::now();
+        let signature = tx.signatures.first().copied().unwrap_or_default();
+        let b64 = tx_to_base64(tx);
+        let body = build_send_transaction_body(&b64, true, 0);
+
+        let mut req = self.client
+            .post(&self.endpoint)
+            .header("Content-Type", "application/json")
+            .body(body);
+        if let Some(uuid) = &self.auth_uuid {
+            req = req.header("x-jito-auth", uuid);
+        }
+
+        let resp_result = req.send().await;
+        let send_ack_at = Some(Instant::now());
+
+        match resp_result {
+            Err(e) => SendOutcome {
+                send_at, send_ack_at: None, signature,
+                provider_request_id: None,
+                http_status: None,
+                rpc_err_code: None,
+                rpc_err_message: None,
+                rate_limit_state: if e.is_timeout() { RateLimitState::Timeout } else { RateLimitState::Ok },
+                error: Some(format!("network: {}", e)),
+            },
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let body_text = resp.text().await.unwrap_or_default();
+                if let Ok(parsed) = serde_json::from_str::<JsonRpcResponse>(&body_text) {
+                    if let Some(err) = parsed.error {
+                        let rate_limit_state = if err.code == -32005 || status == 429 {
+                            RateLimitState::Throttled429
+                        } else {
+                            RateLimitState::Ok
+                        };
+                        SendOutcome {
+                            send_at, send_ack_at, signature,
+                            provider_request_id: None,
+                            http_status: Some(status),
+                            rpc_err_code: Some(err.code),
+                            rpc_err_message: Some(err.message.clone()),
+                            rate_limit_state,
+                            error: Some(err.message),
+                        }
+                    } else {
+                        let returned_sig = parsed.result.and_then(|s| solana_sdk::signature::Signature::from_str(&s).ok());
+                        SendOutcome {
+                            send_at, send_ack_at, signature: returned_sig.unwrap_or(signature),
+                            provider_request_id: None,
+                            http_status: Some(status),
+                            rpc_err_code: None,
+                            rpc_err_message: None,
+                            rate_limit_state: RateLimitState::Ok,
+                            error: None,
+                        }
+                    }
+                } else {
+                    SendOutcome {
+                        send_at, send_ack_at, signature,
+                        provider_request_id: None,
+                        http_status: Some(status),
+                        rpc_err_code: None,
+                        rpc_err_message: Some(format!("non-JSONRPC response: {}", body_text)),
+                        rate_limit_state: if status == 429 { RateLimitState::Throttled429 } else { RateLimitState::Ok },
+                        error: Some(format!("HTTP {} body: {}", status, body_text)),
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jito_construct_basic() {
+        let s = JitoSender::new(0, "jito-fra", "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/transactions", None);
+        assert_eq!(s.name(), "jito-fra");
+        assert_eq!(s.protocol(), "HTTP_JSONRPC");
+    }
+
+    #[test]
+    fn jito_with_auth() {
+        let s = JitoSender::new(0, "jito-fra", "https://x/api/v1/transactions", Some("uuid-123".into()));
+        assert_eq!(s.auth_uuid.as_deref(), Some("uuid-123"));
+    }
+}

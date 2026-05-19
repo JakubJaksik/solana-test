@@ -1,5 +1,7 @@
 //! TxSender trait — uniform contract for all send mechanisms.
 
+pub mod helius;
+pub mod jito;
 pub mod mock;
 
 use crate::outcome::RateLimitState;
