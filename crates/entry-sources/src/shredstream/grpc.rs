@@ -89,6 +89,15 @@ async fn run_once(
     let mut messages = stream.into_inner();
     info!(endpoint, "shredstream grpc subscription open");
 
+    // Per-slot cumulative entry offset. Each proxy message carries one batch
+    // of entries (typically one deshredded FEC set). Without this counter the
+    // emitted `entry_index` would reset to 0 on every message, making it
+    // impossible for downstream consumers to reconstruct PoH order even when
+    // the proxy emits batches in the right sequence.
+    let mut slot_offset: std::collections::HashMap<u64, u32> =
+        std::collections::HashMap::with_capacity(64);
+    let mut highest_slot: u64 = 0;
+
     while let Some(msg) = messages.next().await {
         // Timestamp is the first operation after stream yields a message.
         let observed_at = Instant::now();
@@ -102,8 +111,20 @@ async fn run_once(
             }
         };
 
+        let base = *slot_offset.entry(slot).or_insert(0);
         for (i, entry) in entries.iter().enumerate() {
-            emit(slot, i as u32, entry, observed_at, tx, counters);
+            emit(slot, base + i as u32, entry, observed_at, tx, counters);
+        }
+        *slot_offset.get_mut(&slot).unwrap() = base + entries.len() as u32;
+
+        // Bounded-memory eviction: drop offsets for slots far behind the
+        // frontier. 512 slots ~= 3.5 minutes of history on mainnet.
+        if slot > highest_slot {
+            highest_slot = slot;
+        }
+        if slot_offset.len() > 1024 {
+            let cutoff = highest_slot.saturating_sub(512);
+            slot_offset.retain(|s, _| *s >= cutoff);
         }
     }
     Ok(())
