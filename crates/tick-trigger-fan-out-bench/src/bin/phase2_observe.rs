@@ -52,9 +52,11 @@ struct Args {
     #[arg(long, default_value_t = 5)]
     summary_interval_secs: u64,
     /// How long the supervisor waits for a missing entry_index before
-    /// emitting a `Missing` marker and skipping forward. Default tuned to
-    /// cover observed inter-source latency p99 (~80ms) with margin.
-    #[arg(long, default_value = "100ms")]
+    /// emitting a `Missing` marker and skipping forward. 150ms covers the
+    /// observed inter-source max (~120ms) with ~25% margin. The cost is
+    /// extra wait latency only for entries downstream of a real gap
+    /// (≈0.2% of total).
+    #[arg(long, default_value = "150ms")]
     entry_timeout: humantime::Duration,
     /// How many slots behind the highest-seen slot before sealing. 10 slots
     /// ≈ 4 s — comfortably larger than any plausible inter-source delay.

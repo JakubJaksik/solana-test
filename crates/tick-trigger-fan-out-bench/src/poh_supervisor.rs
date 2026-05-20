@@ -278,6 +278,15 @@ fn process(slots: &mut BTreeMap<u64, PohSlot>, merged: MergedEntry, cfg: &PohSup
             .pending_peak_size
             .fetch_max(size, Ordering::Relaxed);
     } else {
+        // idx < next_expected — already emitted past it (or Missing'd it).
+        // We can't preserve PoH order in the output, but if this late arrival
+        // is a tick entry we'd otherwise lose, still count it toward the
+        // slot's tick_idx so SlotComplete/SlotIncomplete reflect on-chain
+        // reality (every tick that actually arrived from any source counts).
+        let obs = merged.observation;
+        if obs.tx_count == 0 && slot_state.tick_idx < TICKS_PER_SLOT {
+            slot_state.tick_idx = slot_state.tick_idx.saturating_add(1);
+        }
         cfg.counters
             .duplicates_dropped
             .fetch_add(1, Ordering::Relaxed);
