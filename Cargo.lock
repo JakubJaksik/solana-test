@@ -11421,6 +11421,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "tick-trigger-fan-out-bench"
+version = "0.1.0"
+dependencies = [
+ "ahash 0.8.12",
+ "anyhow",
+ "chrono",
+ "clap",
+ "core_affinity",
+ "crossbeam-channel",
+ "ctrlc",
+ "entry-sources",
+ "humantime",
+ "parking_lot 0.12.5",
+ "serde",
+ "serde_json",
+ "solana-sdk",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "time"
 version = "0.3.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"

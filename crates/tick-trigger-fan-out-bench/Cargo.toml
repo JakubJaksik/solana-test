@@ -1,0 +1,36 @@
+[package]
+name = "tick-trigger-fan-out-bench"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Modular rebuild: tick-trigger semantics + fan-out tx sending. Built phase-by-phase, each phase metric'd, testable, and runnable in isolation."
+
+[dependencies]
+entry-sources = { path = "../entry-sources" }
+tokio.workspace = true
+crossbeam-channel.workspace = true
+core_affinity.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+solana-sdk.workspace = true
+humantime.workspace = true
+parking_lot = "0.12"
+ctrlc = "3"
+# AHash for the dedup HashMap — 2-3× faster than stdlib SipHash on our
+# 40-byte (slot u64, blake3 Hash) keys. Single-threaded merger means we
+# don't need DoS resistance.
+ahash = "0.8"
+
+[lib]
+name = "tick_trigger_fan_out_bench"
+path = "src/lib.rs"
+
+[[bin]]
+name = "phase1_observe"
+path = "src/bin/phase1_observe.rs"

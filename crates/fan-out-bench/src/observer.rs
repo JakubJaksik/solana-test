@@ -115,10 +115,6 @@ fn process_entry(merged: &MergedEntry, states: &mut HashMap<u64, SlotState>, cfg
         return;
     }
 
-    if let Some(cache) = &cfg.slot_hash_cache {
-        cache.update(obs.slot, obs.entry_index, obs.entry_hash);
-    }
-
     state.cumulative_hashes_in_slot = state
         .cumulative_hashes_in_slot
         .saturating_add(obs.num_hashes);
@@ -128,12 +124,14 @@ fn process_entry(merged: &MergedEntry, states: &mut HashMap<u64, SlotState>, cfg
 
     let is_tick = obs.tx_count == 0
         && state.hash_count_since_last_tick == HASHES_PER_TICK;
+    let mut tick_for_cache: Option<u8> = None;
 
     if is_tick {
         if state.tick_idx < TICKS_PER_SLOT {
             state.tick_idx = state.tick_idx.saturating_add(1);
             let tick_now = state.tick_idx;
             state.hash_count_since_last_tick = 0;
+            tick_for_cache = Some(tick_now);
 
             cfg.counters
                 .schedule_contains_calls
@@ -161,6 +159,14 @@ fn process_entry(merged: &MergedEntry, states: &mut HashMap<u64, SlotState>, cfg
                 .fork_tick_overflow
                 .fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    // Store entry in SlotHashCache for local-compute nonce derivation. We pass
+    // tick_for_cache (Some when this entry was a tick, with its 1-based index
+    // 1..=64) so the cache can track tick boundaries explicitly — needed for
+    // the chain-hash fallback when we miss the final tick of a slot.
+    if let Some(cache) = &cfg.slot_hash_cache {
+        cache.update(obs.slot, obs.entry_index, obs.entry_hash, tick_for_cache);
     }
 
     // Sig matching: if this entry contains any of our pending signatures, emit MatchEvent.

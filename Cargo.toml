@@ -7,6 +7,7 @@ members = [
     "crates/entry-comparator",
     "crates/tick-trigger-bench",
     "crates/fan-out-bench",
+    "crates/tick-trigger-fan-out-bench",
 ]
 
 [workspace.package]
