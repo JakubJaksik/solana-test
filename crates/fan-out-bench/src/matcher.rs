@@ -141,7 +141,32 @@ fn run_loop(cfg: MatcherConfig) {
             sweep_deadlines(&mut attempts, &mut sig_to_key, &cfg);
         }
     }
-    sweep_deadlines(&mut attempts, &mut sig_to_key, &cfg);
+    // Shutdown flush: emit ALL remaining attempts as UnknownPending, bypassing
+    // the deadline check. Without this, short runs (Ctrl-C before the 90s
+    // observation window) leave most in-flight rows out of the parquet,
+    // hiding all diagnostic info about what got sent.
+    let remaining_keys: Vec<(TriggerId, u8)> = attempts.keys().copied().collect();
+    let flushed = remaining_keys.len();
+    for key in remaining_keys {
+        if let Some(rec) = attempts.remove(&key) {
+            sig_to_key.remove(&rec.reg.signature);
+            let record = build_record_from_record(&rec, &cfg, TentativeOutcome::UnknownPending, None);
+            if cfg.final_tx.try_send(record).is_err() {
+                cfg.counters.final_queue_full.fetch_add(1, Ordering::Relaxed);
+            }
+            if let Some(ftx) = &cfg.finality_tx {
+                let _ = ftx.send(FinalityQueueEntry {
+                    trigger_id: rec.reg.trigger_id,
+                    sender_id: rec.reg.sender_id,
+                    signature: rec.reg.signature,
+                    queued_at: Instant::now(),
+                });
+            }
+        }
+    }
+    if flushed > 0 {
+        tracing::info!(flushed, "matcher shutdown: flushed remaining in-flight attempts");
+    }
 }
 
 fn register_attempt(

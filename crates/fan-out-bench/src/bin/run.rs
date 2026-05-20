@@ -228,22 +228,23 @@ fn main() -> Result<()> {
     // matcher::handle_match_event. Geyser account subscription is intentionally
     // NOT started — it was unreliable on Helius YS and we no longer depend on it.
     //
-    // RPC poll stays as an emergency fallback ONLY: it advances Stale entries
-    // back to Ready by re-reading the account. The poll cadence is long so it
-    // never touches the hot path. If local-compute is healthy, this poller
-    // does nothing.
+    // RPC poll is a SHORT-interval fallback for the case where a trigger's
+    // siblings all dropped (vendor rejected silently or chain never included
+    // any). After in_flight_deadline a nonce transitions to Stale; rpc_poll
+    // re-fetches and restores Ready. Without this path stale nonces freeze
+    // the pool until manual restart.
     {
         let manager = nonce_manager.clone();
         let stop = handles.stop.clone();
         let _ = fan_out_bench::nonce::rpc_poll::spawn(fan_out_bench::nonce::rpc_poll::RpcPollerConfig {
             rpc: rpc.clone(),
             manager,
-            poll_interval: std::time::Duration::from_secs(300),
-            in_flight_deadline: std::time::Duration::from_secs(120),
-            awaiting_update_deadline: std::time::Duration::from_secs(60),
+            poll_interval: std::time::Duration::from_secs(15),
+            in_flight_deadline: std::time::Duration::from_secs(45),
+            awaiting_update_deadline: std::time::Duration::from_secs(15),
             stop,
         })?;
-        tracing::info!("nonce rpc emergency fallback poller started (5 min interval)");
+        tracing::info!("nonce rpc fallback poller started (15s interval, 45s in-flight deadline)");
     }
 
     tracing::info!("runtime started — bench is running. Ctrl-C to stop.");
