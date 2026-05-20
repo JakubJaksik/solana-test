@@ -19,6 +19,7 @@ pub mod runtime;
 pub mod schedule;
 pub mod schedule_pump;
 pub mod senders;
+pub mod slot_hash_cache;
 pub mod tip_accounts;
 pub mod trigger;
 pub mod trigger_id;

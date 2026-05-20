@@ -12,6 +12,7 @@ use crate::observer::{spawn as spawn_observer, ObserverConfig};
 use crate::pool::TxPool;
 use crate::preparer::{spawn as spawn_preparer, PreparerConfig};
 use crate::schedule::{Schedule, ScheduleEntry};
+use crate::slot_hash_cache::SlotHashCache;
 use crate::schedule_pump::{spawn as spawn_pump, PumpConfig};
 use crate::senders::TxSender;
 use crate::tip_accounts::{tip_accounts_for, TipAccountRotator};
@@ -66,6 +67,7 @@ pub fn start(inputs: RuntimeInputs) -> anyhow::Result<RuntimeHandles> {
     let (finality_tx, finality_rx) = bounded::<FinalityQueueEntry>(65536);
 
     let current_slot = Arc::new(AtomicU64::new(inputs.start_slot));
+    let slot_hash_cache = Arc::new(SlotHashCache::new(64));
 
     // Schedule pump
     let schedule = Schedule::new(
@@ -137,6 +139,7 @@ pub fn start(inputs: RuntimeInputs) -> anyhow::Result<RuntimeHandles> {
         match_tx,
         pending_sigs: pending_sigs.clone(),
         current_slot: current_slot.clone(),
+        slot_hash_cache: Some(slot_hash_cache.clone()),
         pinned_core: None,
         counters: counters.clone(),
         stop: stop.clone(),
@@ -210,6 +213,8 @@ pub fn start(inputs: RuntimeInputs) -> anyhow::Result<RuntimeHandles> {
         counters: counters.clone(),
         stop: stop.clone(),
         finality_tx: Some(finality_tx.clone()),
+        nonce_manager: Some(inputs.nonce_manager.clone()),
+        slot_hash_cache: Some(slot_hash_cache.clone()),
     })?;
 
     // Parquet

@@ -6,6 +6,7 @@
 use crate::counters::BenchCounters;
 use crate::match_event::MatchEvent;
 use crate::merger::MergedEntry;
+use crate::slot_hash_cache::SlotHashCache;
 use crate::trigger::TriggerEvent;
 use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender};
@@ -37,6 +38,7 @@ pub struct ObserverConfig {
     pub match_tx: Sender<MatchEvent>,
     pub pending_sigs: Arc<DashSet<Signature>>,
     pub current_slot: Arc<AtomicU64>,
+    pub slot_hash_cache: Option<Arc<SlotHashCache>>,
     pub pinned_core: Option<usize>,
     pub counters: Arc<BenchCounters>,
     pub stop: Arc<AtomicBool>,
@@ -111,6 +113,10 @@ fn process_entry(merged: &MergedEntry, states: &mut HashMap<u64, SlotState>, cfg
 
     if !state.seen_entries.insert(obs.entry_hash) {
         return;
+    }
+
+    if let Some(cache) = &cfg.slot_hash_cache {
+        cache.update(obs.slot, obs.entry_hash);
     }
 
     state.cumulative_hashes_in_slot = state
@@ -246,6 +252,7 @@ mod tests {
             match_tx,
             pending_sigs: pending_sigs.clone(),
             current_slot,
+            slot_hash_cache: None,
             pinned_core: None,
             counters: counters.clone(),
             stop: stop.clone(),

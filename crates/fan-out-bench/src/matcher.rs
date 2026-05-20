@@ -7,7 +7,9 @@ use crate::attempt_state::AttemptState;
 use crate::counters::BenchCounters;
 use crate::finality_tracker::FinalityQueueEntry;
 use crate::match_event::MatchEvent;
+use crate::nonce::manager::NonceManager;
 use crate::outcome::{FinalStatus, ObservedSource, RateLimitState, TentativeOutcome};
+use crate::slot_hash_cache::{compute_next_durable_nonce, SlotHashCache};
 use crate::trigger_id::TriggerId;
 use crate::writer::record::FinalRecord;
 use crossbeam_channel::{Receiver, Sender};
@@ -88,10 +90,12 @@ pub struct MatcherConfig {
     pub pinned_core: Option<usize>,
     pub counters: Arc<BenchCounters>,
     pub stop: Arc<AtomicBool>,
-    /// Optional NonceManager — when set, matcher calls on_observed_landing
-    /// after matching a sig so nonce transitions to AwaitingUpdate immediately
-    /// (faster recovery than waiting for YS account subscription).
-    pub nonce_manager: Option<Arc<crate::nonce::manager::NonceManager>>,
+    /// Local-compute nonce recovery: on MatchEvent for our sig, lookup the
+    /// last_entry_hash of the prior slot in `slot_hash_cache`, derive the new
+    /// durable-nonce value, and push it to the manager. Both must be Some()
+    /// for the hook to run; otherwise matcher is a pure record builder.
+    pub nonce_manager: Option<Arc<NonceManager>>,
+    pub slot_hash_cache: Option<Arc<SlotHashCache>>,
 }
 
 pub fn spawn(cfg: MatcherConfig) -> std::io::Result<JoinHandle<()>> {
@@ -210,6 +214,40 @@ fn handle_match_event(
         observed_cumulative_hashes_in_slot: ev.observed_cumulative_hashes_in_slot,
         observed_source: ev.observed_source,
     };
+
+    // Local-compute nonce recovery: derive the new durable-nonce value from
+    // the last_entry_hash of slot S-k (k=1..5) and push it to NonceManager so
+    // the next take_ready() sees this nonce as Ready immediately. All siblings
+    // of a trigger share one nonce_account_id (durable-nonce dedup), so we run
+    // the hook exactly once, anchored on the winner.
+    if let (Some(manager), Some(cache)) = (&cfg.nonce_manager, &cfg.slot_hash_cache) {
+        if let Some(winner_rec) = attempts.get(&winner_key) {
+            let nonce_id = winner_rec.reg.nonce_account_id;
+            match cache.lookup_recent_blockhash(ev.observed_slot, 5) {
+                Some((src_slot, prev_blockhash)) => {
+                    let new_nonce = compute_next_durable_nonce(prev_blockhash);
+                    let changed = manager.on_landing_with_blockhash(nonce_id, new_nonce);
+                    cfg.counters
+                        .nonce_advance_observed
+                        .fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(
+                        nonce_id,
+                        landed_slot = ev.observed_slot,
+                        source_slot = src_slot,
+                        changed,
+                        "local-compute nonce advance"
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        nonce_id,
+                        landed_slot = ev.observed_slot,
+                        "slot_hash_cache miss for landed_slot-1..5; nonce not advanced"
+                    );
+                }
+            }
+        }
+    }
 
     let mut to_remove = Vec::new();
     for key in sibling_keys {
@@ -501,6 +539,8 @@ mod tests {
             pinned_core: None,
             counters: Arc::new(BenchCounters::default()),
             stop: stop.clone(),
+            nonce_manager: None,
+            slot_hash_cache: None,
         }).unwrap();
         (reg_tx, send_tx, match_tx, final_rx, stop, handle, anchor)
     }

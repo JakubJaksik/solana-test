@@ -50,6 +50,8 @@ fn matcher_to_parquet_emits_winner_and_siblings() {
         pinned_core: None,
         counters: Arc::new(BenchCounters::default()),
         stop: stop.clone(),
+        nonce_manager: None,
+        slot_hash_cache: None,
     }).unwrap();
 
     let tid = TriggerId::new(100, 5, 0);

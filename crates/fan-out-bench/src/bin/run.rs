@@ -223,52 +223,27 @@ fn main() -> Result<()> {
         start_slot,
     })?;
 
-    // Start nonce Geyser subscription (live nonce advance notifications)
-    {
-        let manager = nonce_manager.clone();
-        let stop = handles.stop.clone();
-        let endpoint = config.sources.yellowstone_grpc_url.clone();
-        let token = config.sources.yellowstone_auth_token.clone();
-        std::thread::Builder::new()
-            .name("nonce-geyser".into())
-            .spawn(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::error!(error = %e, "failed to build nonce-geyser tokio runtime");
-                        return;
-                    }
-                };
-                if let Err(e) = rt.block_on(fan_out_bench::nonce::geyser_sub::run(
-                    fan_out_bench::nonce::geyser_sub::GeyserConfig {
-                        endpoint,
-                        auth_token: token,
-                        manager,
-                        stop,
-                    },
-                )) {
-                    tracing::error!(error = %e, "nonce geyser subscription exited");
-                }
-            })?;
-        tracing::info!("nonce geyser subscription started");
-    }
-
-    // Start nonce RPC fallback poller (stale recovery)
+    // Local-compute nonce recovery (matcher derives next durable-nonce from
+    // SS+YS last_entry_hash) is the primary path; see slot_hash_cache.rs and
+    // matcher::handle_match_event. Geyser account subscription is intentionally
+    // NOT started — it was unreliable on Helius YS and we no longer depend on it.
+    //
+    // RPC poll stays as an emergency fallback ONLY: it advances Stale entries
+    // back to Ready by re-reading the account. The poll cadence is long so it
+    // never touches the hot path. If local-compute is healthy, this poller
+    // does nothing.
     {
         let manager = nonce_manager.clone();
         let stop = handles.stop.clone();
         let _ = fan_out_bench::nonce::rpc_poll::spawn(fan_out_bench::nonce::rpc_poll::RpcPollerConfig {
             rpc: rpc.clone(),
             manager,
-            poll_interval: std::time::Duration::from_secs(15),
-            in_flight_deadline: std::time::Duration::from_secs(45),
-            awaiting_update_deadline: std::time::Duration::from_secs(10),
+            poll_interval: std::time::Duration::from_secs(300),
+            in_flight_deadline: std::time::Duration::from_secs(120),
+            awaiting_update_deadline: std::time::Duration::from_secs(60),
             stop,
         })?;
-        tracing::info!("nonce rpc fallback poller started");
+        tracing::info!("nonce rpc emergency fallback poller started (5 min interval)");
     }
 
     tracing::info!("runtime started — bench is running. Ctrl-C to stop.");

@@ -160,6 +160,40 @@ impl NonceManager {
         }
     }
 
+    /// Called by matcher with the locally-computed next durable-nonce value
+    /// (see `slot_hash_cache::compute_next_durable_nonce`). Transitions any
+    /// non-Ready state directly to Ready { new_blockhash }, bypassing the
+    /// YS/RPC observation path entirely.
+    pub fn on_landing_with_blockhash(&self, nonce_id: NonceId, new_blockhash: Hash) -> bool {
+        let entry = match self.get_by_id(nonce_id) {
+            Some(e) => e,
+            None => return false,
+        };
+        let mut guard = entry.state.write();
+        match *guard {
+            NonceState::InFlight { .. }
+            | NonceState::AwaitingUpdate { .. }
+            | NonceState::Stale { .. } => {
+                *guard = NonceState::Ready {
+                    blockhash: new_blockhash,
+                };
+                true
+            }
+            NonceState::Ready { blockhash } => {
+                // Out-of-order observation: if local-compute reports a different
+                // hash than what we already have Ready, accept the newer value.
+                if blockhash != new_blockhash {
+                    *guard = NonceState::Ready {
+                        blockhash: new_blockhash,
+                    };
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     /// Sweep entries past deadline. Returns list of pubkeys now in Stale state.
     pub fn tick_timeouts(
         &self,
@@ -316,6 +350,44 @@ mod tests {
         let advanced = manager.on_account_update(&pk, bh);
         assert!(!advanced);
         assert!(matches!(manager.get_by_id(0).unwrap().state(), NonceState::InFlight { .. }));
+    }
+
+    #[test]
+    fn on_landing_with_blockhash_from_in_flight_to_ready() {
+        let pk = Pubkey::new_unique();
+        let bh1 = Hash::new_unique();
+        let bh2 = Hash::new_unique();
+        let manager = NonceManager::new(vec![(7, pk, bh1)]);
+        manager.take_ready().unwrap();
+        let changed = manager.on_landing_with_blockhash(7, bh2);
+        assert!(changed);
+        match manager.get_by_id(7).unwrap().state() {
+            NonceState::Ready { blockhash } => assert_eq!(blockhash, bh2),
+            other => panic!("expected Ready, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn on_landing_with_blockhash_noop_for_unknown_id() {
+        let manager = make_manager(2);
+        assert!(!manager.on_landing_with_blockhash(99, Hash::new_unique()));
+    }
+
+    #[test]
+    fn on_landing_with_blockhash_from_stale_recovers() {
+        let pk = Pubkey::new_unique();
+        let bh1 = Hash::new_unique();
+        let bh2 = Hash::new_unique();
+        let manager = NonceManager::new(vec![(0, pk, bh1)]);
+        manager.take_ready().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        manager.tick_timeouts(Duration::from_millis(10), Duration::from_secs(5));
+        assert!(matches!(manager.get_by_id(0).unwrap().state(), NonceState::Stale { .. }));
+        assert!(manager.on_landing_with_blockhash(0, bh2));
+        match manager.get_by_id(0).unwrap().state() {
+            NonceState::Ready { blockhash } => assert_eq!(blockhash, bh2),
+            other => panic!("expected Ready, got {:?}", other),
+        }
     }
 
     #[test]
