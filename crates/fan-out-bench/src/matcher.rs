@@ -262,16 +262,19 @@ fn handle_match_event(
         if let Some(winner_rec) = attempts.get(&winner_key) {
             let nonce_id = winner_rec.reg.nonce_account_id;
             match cache.lookup_recent_blockhash(ev.observed_slot, 5) {
-                Some((src_slot, prev_blockhash)) => {
+                Some((src_slot, max_idx, prev_blockhash)) => {
                     let new_nonce = compute_next_durable_nonce(prev_blockhash);
                     let changed = manager.on_landing_with_blockhash(nonce_id, new_nonce);
                     cfg.counters
                         .nonce_advance_observed
                         .fetch_add(1, Ordering::Relaxed);
-                    tracing::debug!(
+                    tracing::info!(
                         nonce_id,
                         landed_slot = ev.observed_slot,
                         source_slot = src_slot,
+                        source_max_entry_idx = max_idx,
+                        prev_blockhash = %prev_blockhash,
+                        new_nonce = %new_nonce,
                         changed,
                         "local-compute nonce advance"
                     );

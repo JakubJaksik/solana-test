@@ -10,11 +10,11 @@ use crate::tip_accounts::TipAccountRotator;
 use crate::tx_builder::{build_variant, VariantParams};
 use crossbeam_channel::Receiver;
 use solana_sdk::signature::Keypair;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub struct PreparerConfig {
     pub schedule_rx: Receiver<ScheduleEntry>,
@@ -54,33 +54,51 @@ fn run_loop(cfg: PreparerConfig, prepared_tx: crossbeam_channel::Sender<Prepared
     let authority_pubkey = cfg.authority.pubkey();
     let mut total_prepared: u64 = 0;
     let mut total_signed: u64 = 0;
-    let mut last_status = std::time::Instant::now();
+    let mut last_status = Instant::now();
+    // Local queue: when no ready nonce is available we MUST NOT drop entries —
+    // schedule_pump generates each (slot, tick) deterministically and never
+    // re-sends. Buffer pending entries here and wait for a nonce.
+    let mut pending: VecDeque<ScheduleEntry> = VecDeque::with_capacity(1024);
     loop {
         if cfg.stop.load(Ordering::Relaxed) {
             break;
         }
 
-        if last_status.elapsed() >= std::time::Duration::from_secs(5) {
-            last_status = std::time::Instant::now();
+        if last_status.elapsed() >= Duration::from_secs(5) {
+            last_status = Instant::now();
             tracing::info!(
                 total_prepared,
                 total_signed,
                 nonce_ready = cfg.nonce_manager.ready_count(),
                 nonce_total = cfg.nonce_manager.len(),
+                pending_entries = pending.len(),
                 "preparer status"
             );
         }
 
-        let entry = match cfg.schedule_rx.recv_timeout(std::time::Duration::from_millis(200)) {
-            Ok(e) => e,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-        };
+        // Drain any newly-arrived schedule entries into the local queue.
+        while let Ok(e) = cfg.schedule_rx.try_recv() {
+            pending.push_back(e);
+        }
 
+        // If queue is empty, block briefly waiting for the next entry.
+        if pending.is_empty() {
+            match cfg.schedule_rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(e) => pending.push_back(e),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        // Try to claim a ready nonce. If none, keep entries in queue and back off.
         let Some((nonce_id, nonce_pubkey, nonce_blockhash)) = cfg.nonce_manager.take_ready() else {
             cfg.counters.nonce_stalls.fetch_add(1, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(2));
             continue;
         };
+
+        // Safe: we just verified pending is non-empty above and only this thread pops.
+        let entry = pending.pop_front().expect("pending non-empty after refill");
         total_prepared += 1;
 
         let prepared_at = Instant::now();

@@ -81,51 +81,6 @@ impl BackOffState {
     }
 }
 
-#[cfg(test)]
-mod back_off_tests {
-    use super::*;
-
-    #[test]
-    fn parses_jito_retry_after_format() {
-        let msg = "Rate limit exceeded. Limit: 1 per second for txn requests. Back-off triggered: Retry after 1606ms";
-        assert_eq!(BackOffState::parse_retry_after_ms(msg), Some(1606));
-    }
-
-    #[test]
-    fn parses_with_space_before_ms() {
-        let msg = "Retry after 1000 ms";
-        assert_eq!(BackOffState::parse_retry_after_ms(msg), Some(1000));
-    }
-
-    #[test]
-    fn returns_none_when_format_differs() {
-        assert!(BackOffState::parse_retry_after_ms("Network congested. Endpoint is globally rate limited.").is_none());
-    }
-
-    #[test]
-    fn remaining_returns_none_when_no_back_off() {
-        let s = BackOffState::default();
-        assert!(s.remaining().is_none());
-    }
-
-    #[test]
-    fn remaining_some_after_record() {
-        let s = BackOffState::default();
-        s.record_retry_after(500);
-        assert!(s.remaining().is_some());
-        assert!(s.remaining().unwrap().as_millis() <= 500);
-    }
-
-    #[test]
-    fn record_never_shortens_window() {
-        let s = BackOffState::default();
-        s.record_retry_after(5000);
-        s.record_retry_after(100);
-        let remaining_ms = s.remaining().unwrap().as_millis();
-        assert!(remaining_ms > 1000, "shorter retry should not override longer one (got {} ms)", remaining_ms);
-    }
-}
-
 /// Build a SendOutcome representing a request that was skipped client-side
 /// because the sender is in a self-imposed back-off window.
 pub(crate) fn back_off_skip_outcome(
@@ -211,5 +166,50 @@ pub(crate) async fn parse_jsonrpc_or_text(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod back_off_tests {
+    use super::*;
+
+    #[test]
+    fn parses_jito_retry_after_format() {
+        let msg = "Rate limit exceeded. Limit: 1 per second for txn requests. Back-off triggered: Retry after 1606ms";
+        assert_eq!(BackOffState::parse_retry_after_ms(msg), Some(1606));
+    }
+
+    #[test]
+    fn parses_with_space_before_ms() {
+        let msg = "Retry after 1000 ms";
+        assert_eq!(BackOffState::parse_retry_after_ms(msg), Some(1000));
+    }
+
+    #[test]
+    fn returns_none_when_format_differs() {
+        assert!(BackOffState::parse_retry_after_ms("Network congested. Endpoint is globally rate limited.").is_none());
+    }
+
+    #[test]
+    fn remaining_returns_none_when_no_back_off() {
+        let s = BackOffState::default();
+        assert!(s.remaining().is_none());
+    }
+
+    #[test]
+    fn remaining_some_after_record() {
+        let s = BackOffState::default();
+        s.record_retry_after(500);
+        assert!(s.remaining().is_some());
+        assert!(s.remaining().unwrap().as_millis() <= 500);
+    }
+
+    #[test]
+    fn record_never_shortens_window() {
+        let s = BackOffState::default();
+        s.record_retry_after(5000);
+        s.record_retry_after(100);
+        let remaining_ms = s.remaining().unwrap().as_millis();
+        assert!(remaining_ms > 1000, "shorter retry should not override longer one (got {} ms)", remaining_ms);
     }
 }

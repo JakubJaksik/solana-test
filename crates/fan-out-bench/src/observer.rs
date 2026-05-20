@@ -116,7 +116,7 @@ fn process_entry(merged: &MergedEntry, states: &mut HashMap<u64, SlotState>, cfg
     }
 
     if let Some(cache) = &cfg.slot_hash_cache {
-        cache.update(obs.slot, obs.entry_hash);
+        cache.update(obs.slot, obs.entry_index, obs.entry_hash);
     }
 
     state.cumulative_hashes_in_slot = state
