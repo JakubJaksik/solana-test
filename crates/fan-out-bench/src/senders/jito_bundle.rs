@@ -1,6 +1,6 @@
 //! Jito bundle sender — POST to /api/v1/bundles with sendBundle method.
 
-use super::{SendOutcome, TxSender};
+use super::{back_off_skip_outcome, BackOffState, SendOutcome, TxSender};
 use crate::http_jsonrpc::{build_http_client, tx_to_base64, JsonRpcResponse};
 use crate::outcome::RateLimitState;
 use serde::Serialize;
@@ -26,6 +26,7 @@ pub struct JitoBundleSender {
     endpoint: String,
     auth_uuid: Option<String>,
     client: reqwest::Client,
+    back_off: BackOffState,
 }
 
 impl JitoBundleSender {
@@ -41,6 +42,7 @@ impl JitoBundleSender {
             endpoint: endpoint.into(),
             auth_uuid,
             client: build_http_client(Duration::from_secs(5)),
+            back_off: BackOffState::default(),
         }
     }
 
@@ -63,8 +65,11 @@ impl TxSender for JitoBundleSender {
     fn protocol(&self) -> &'static str { "HTTP_JSONRPC" }
 
     async fn send(&self, tx: &Transaction) -> SendOutcome {
-        let send_at = Instant::now();
         let signature = tx.signatures.first().copied().unwrap_or_default();
+        if let Some(remaining) = self.back_off.remaining() {
+            return back_off_skip_outcome(signature, remaining.as_millis());
+        }
+        let send_at = Instant::now();
         let b64 = tx_to_base64(tx);
         let body = self.build_body(&b64);
 
@@ -99,6 +104,11 @@ impl TxSender for JitoBundleSender {
                         } else {
                             RateLimitState::Ok
                         };
+                        if rate_limit_state == RateLimitState::Throttled429 {
+                            if let Some(ms) = BackOffState::parse_retry_after_ms(&err.message) {
+                                self.back_off.record_retry_after(ms);
+                            }
+                        }
                         SendOutcome {
                             send_at, send_ack_at, signature,
                             provider_request_id: None,

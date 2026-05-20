@@ -31,7 +31,7 @@ cargo build --release -p fan-out-bench
 ./target/release/setup_nonces \
   --rpc-url https://api.mainnet.solana.com \
   --wallet ~/solana-test/wallet.json \
-  --count 5 \
+  --count 30 \
   --output-keypairs nonce-keypairs.json \
   --output-config nonce-config.json
 ```
