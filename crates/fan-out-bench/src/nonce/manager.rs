@@ -232,6 +232,36 @@ impl NonceManager {
         stale_now
     }
 
+    /// Called by matcher when a trigger's nonce_restore_after window elapsed
+    /// without any sibling sig being matched. Presumes no variant landed →
+    /// AdvanceNonceAccount was NOT executed → on-chain blockhash is unchanged.
+    /// Restores InFlight/AwaitingUpdate/Stale back to Ready with the SAME
+    /// blockhash it was using. Returns true if state actually changed.
+    ///
+    /// Safety: if a tx actually lands later (delayed observation), the
+    /// subsequent MatchEvent will trigger `on_landing_with_blockhash` which
+    /// overwrites with the correct new blockhash. Worst case: one extra tx
+    /// signs+sends with a stale blockhash and fails validation on-chain at
+    /// 0 lamports cost (durable-nonce property).
+    pub fn restore_unchanged(&self, nonce_id: NonceId) -> bool {
+        let entry = match self.get_by_id(nonce_id) {
+            Some(e) => e,
+            None => return false,
+        };
+        let mut guard = entry.state.write();
+        match *guard {
+            NonceState::InFlight { blockhash_used, .. }
+            | NonceState::AwaitingUpdate { blockhash_used, .. }
+            | NonceState::Stale { blockhash_used, .. } => {
+                *guard = NonceState::Ready {
+                    blockhash: blockhash_used,
+                };
+                true
+            }
+            NonceState::Ready { .. } => false,
+        }
+    }
+
     /// Called by RPC fallback after re-fetching account state.
     pub fn on_fallback_refresh(&self, pubkey: &Pubkey, observed_blockhash: Hash) {
         let entry = match self.get_by_pubkey(pubkey) {
@@ -412,6 +442,28 @@ mod tests {
         for entry in manager.entries() {
             assert!(matches!(entry.state(), NonceState::Stale { .. }));
         }
+    }
+
+    #[test]
+    fn restore_unchanged_from_in_flight() {
+        let pk = Pubkey::new_unique();
+        let bh = Hash::new_unique();
+        let manager = NonceManager::new(vec![(0, pk, bh)]);
+        manager.take_ready().unwrap();
+        assert!(matches!(manager.get_by_id(0).unwrap().state(), NonceState::InFlight { .. }));
+        assert!(manager.restore_unchanged(0));
+        match manager.get_by_id(0).unwrap().state() {
+            NonceState::Ready { blockhash } => assert_eq!(blockhash, bh, "restore preserves blockhash"),
+            other => panic!("expected Ready, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn restore_unchanged_noop_when_already_ready() {
+        let manager = make_manager(1);
+        let entry = &manager.entries()[0];
+        assert!(matches!(entry.state(), NonceState::Ready { .. }));
+        assert!(!manager.restore_unchanged(entry.id));
     }
 
     #[test]

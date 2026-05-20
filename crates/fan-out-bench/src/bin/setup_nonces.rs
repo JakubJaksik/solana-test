@@ -30,7 +30,11 @@ struct Args {
     output_keypairs: PathBuf,
     #[arg(long)]
     output_config: PathBuf,
-    #[arg(long, default_value = "10")]
+    // Solana tx max is 1232 bytes raw. Each create_nonce_account emits 2 ixs
+    // (system::create_account + nonce::initialize_nonce_account), each carrying
+    // a fresh account pubkey signer — with payer signer overhead, ~3 nonces
+    // per batch is the safe upper bound. batch=10 overflows (~2908 bytes).
+    #[arg(long, default_value = "3")]
     batch_size: usize,
 }
 

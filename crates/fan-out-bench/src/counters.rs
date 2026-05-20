@@ -23,6 +23,10 @@ pub struct BenchCounters {
     pub fork_tick_overflow: AtomicU64,
     pub nonce_stalls: AtomicU64,
     pub nonce_advance_observed: AtomicU64,
+    /// Local recovery: nonce restored to Ready with UNCHANGED blockhash after
+    /// `nonce_restore_after` elapsed without any sibling sig being matched.
+    /// Presumes no tx of the trigger landed → nonce never advanced on-chain.
+    pub nonce_restored_unmatched: AtomicU64,
     pub schedule_contains_calls: AtomicU64,
     pub schedule_contains_true: AtomicU64,
     pub rpc_fallback_error: AtomicU64,
@@ -53,6 +57,7 @@ pub struct CountersSnapshot {
     pub fork_tick_overflow: u64,
     pub nonce_stalls: u64,
     pub nonce_advance_observed: u64,
+    pub nonce_restored_unmatched: u64,
     pub schedule_contains_calls: u64,
     pub schedule_contains_true: u64,
     pub rpc_fallback_error: u64,
@@ -85,6 +90,7 @@ impl BenchCounters {
             fork_tick_overflow: l(&self.fork_tick_overflow),
             nonce_stalls: l(&self.nonce_stalls),
             nonce_advance_observed: l(&self.nonce_advance_observed),
+            nonce_restored_unmatched: l(&self.nonce_restored_unmatched),
             schedule_contains_calls: l(&self.schedule_contains_calls),
             schedule_contains_true: l(&self.schedule_contains_true),
             rpc_fallback_error: l(&self.rpc_fallback_error),

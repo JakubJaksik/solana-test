@@ -215,6 +215,7 @@ pub fn start(inputs: RuntimeInputs) -> anyhow::Result<RuntimeHandles> {
         finality_tx: Some(finality_tx.clone()),
         nonce_manager: Some(inputs.nonce_manager.clone()),
         slot_hash_cache: Some(slot_hash_cache.clone()),
+        nonce_restore_after: Duration::from_secs(8),
     })?;
 
     // Parquet

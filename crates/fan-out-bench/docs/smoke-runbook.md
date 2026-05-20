@@ -95,8 +95,8 @@ Oczekiwane:
 
 ```bash
 ./target/release/teardown_nonces \
-  --rpc-url <HELIUS_RPC_URL> \
-  --wallet ~/.config/solana/dex-bench.json \
+  --rpc-url https://api.mainnet.solana.com \
+  --wallet ~/solana-test/wallet.json \
   --keypairs nonce-keypairs.json
 ```
 

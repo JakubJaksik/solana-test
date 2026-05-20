@@ -96,6 +96,12 @@ pub struct MatcherConfig {
     /// for the hook to run; otherwise matcher is a pure record builder.
     pub nonce_manager: Option<Arc<NonceManager>>,
     pub slot_hash_cache: Option<Arc<SlotHashCache>>,
+    /// Time after a trigger's oldest attempt before we assume no sibling will
+    /// land and proactively restore the nonce to Ready with its unchanged
+    /// blockhash. Much shorter than `deadline` (which controls when records
+    /// are emitted as UnknownPending). Keeps the nonce pool alive when all
+    /// senders silently drop (rate-limited, low fee, etc).
+    pub nonce_restore_after: Duration,
 }
 
 pub fn spawn(cfg: MatcherConfig) -> std::io::Result<JoinHandle<()>> {
@@ -112,7 +118,10 @@ pub fn spawn(cfg: MatcherConfig) -> std::io::Result<JoinHandle<()>> {
 fn run_loop(cfg: MatcherConfig) {
     let mut attempts: HashMap<(TriggerId, u8), AttemptRecord> = HashMap::with_capacity(1024);
     let mut sig_to_key: HashMap<Signature, (TriggerId, u8)> = HashMap::with_capacity(1024);
+    let mut restored_triggers: std::collections::HashSet<TriggerId> =
+        std::collections::HashSet::with_capacity(256);
     let mut last_deadline_sweep = Instant::now();
+    let mut last_nonce_sweep = Instant::now();
 
     loop {
         if cfg.stop.load(Ordering::Relaxed) {
@@ -139,6 +148,10 @@ fn run_loop(cfg: MatcherConfig) {
         if last_deadline_sweep.elapsed() >= Duration::from_millis(500) {
             last_deadline_sweep = Instant::now();
             sweep_deadlines(&mut attempts, &mut sig_to_key, &cfg);
+        }
+        if last_nonce_sweep.elapsed() >= Duration::from_millis(1000) {
+            last_nonce_sweep = Instant::now();
+            sweep_unmatched_nonces(&attempts, &mut restored_triggers, &cfg);
         }
     }
     // Shutdown flush: emit ALL remaining attempts as UnknownPending, bypassing
@@ -332,6 +345,61 @@ fn sweep_deadlines(
                 });
             }
         }
+    }
+}
+
+/// Restore nonces locally for triggers that have NO matched sibling after
+/// `nonce_restore_after`. Without this path the nonce pool drains whenever
+/// vendors silently drop tx (Jito 429, low-tip skips, etc.), and recovery
+/// has to wait for rpc_poll (slow + RPC pressure).
+fn sweep_unmatched_nonces(
+    attempts: &HashMap<(TriggerId, u8), AttemptRecord>,
+    restored: &mut std::collections::HashSet<TriggerId>,
+    cfg: &MatcherConfig,
+) {
+    let Some(manager) = &cfg.nonce_manager else { return };
+    if attempts.is_empty() {
+        return;
+    }
+    let now = Instant::now();
+
+    // Group by trigger: oldest observed_at + nonce_id + whether ANY sibling
+    // already has match_info. One pass.
+    let mut per_trigger: HashMap<TriggerId, (Instant, u16, bool)> = HashMap::with_capacity(64);
+    for ((tid, _), rec) in attempts.iter() {
+        let matched = rec.match_info.is_some();
+        per_trigger
+            .entry(*tid)
+            .and_modify(|(oldest, _, m)| {
+                if rec.reg.trigger_observed_at < *oldest {
+                    *oldest = rec.reg.trigger_observed_at;
+                }
+                if matched {
+                    *m = true;
+                }
+            })
+            .or_insert((rec.reg.trigger_observed_at, rec.reg.nonce_account_id, matched));
+    }
+
+    for (tid, (oldest, nonce_id, matched)) in per_trigger {
+        if matched || restored.contains(&tid) {
+            continue;
+        }
+        if now.duration_since(oldest) < cfg.nonce_restore_after {
+            continue;
+        }
+        if manager.restore_unchanged(nonce_id) {
+            cfg.counters
+                .nonce_restored_unmatched
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::info!(
+                nonce_id,
+                trigger_id = ?tid,
+                elapsed_ms = now.duration_since(oldest).as_millis() as u64,
+                "restored nonce: no sibling landed within window"
+            );
+        }
+        restored.insert(tid);
     }
 }
 
@@ -566,6 +634,7 @@ mod tests {
             stop: stop.clone(),
             nonce_manager: None,
             slot_hash_cache: None,
+            nonce_restore_after: Duration::from_secs(8),
         }).unwrap();
         (reg_tx, send_tx, match_tx, final_rx, stop, handle, anchor)
     }

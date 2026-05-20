@@ -52,6 +52,7 @@ fn matcher_to_parquet_emits_winner_and_siblings() {
         stop: stop.clone(),
         nonce_manager: None,
         slot_hash_cache: None,
+        nonce_restore_after: Duration::from_secs(8),
     }).unwrap();
 
     let tid = TriggerId::new(100, 5, 0);
