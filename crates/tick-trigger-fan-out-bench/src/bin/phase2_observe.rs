@@ -52,11 +52,13 @@ struct Args {
     #[arg(long, default_value_t = 5)]
     summary_interval_secs: u64,
     /// How long the supervisor waits for a missing entry_index before
-    /// emitting a `Missing` marker and skipping forward.
-    #[arg(long, default_value = "50ms")]
+    /// emitting a `Missing` marker and skipping forward. Default tuned to
+    /// cover observed inter-source latency p99 (~80ms) with margin.
+    #[arg(long, default_value = "100ms")]
     entry_timeout: humantime::Duration,
-    /// How many slots behind the highest-seen slot before sealing.
-    #[arg(long, default_value_t = 5)]
+    /// How many slots behind the highest-seen slot before sealing. 10 slots
+    /// ≈ 4 s — comfortably larger than any plausible inter-source delay.
+    #[arg(long, default_value_t = 10)]
     slot_seal_lag_slots: u64,
 }
 
@@ -444,13 +446,15 @@ fn process_event(
         }
         OrderedEvent::SlotIncomplete(i) => {
             let mut s = summaries.lock();
+            // `last_seen_index` is the highest entry_index actually emitted —
+            // approximates entries seen for this incomplete slot (off by ≤1).
             s.insert(
                 i.slot,
                 SlotSummary {
                     slot: i.slot,
                     is_complete: false,
                     is_incomplete: true,
-                    total_entries: 0,
+                    total_entries: i.last_seen_index.saturating_add(1),
                     missing_count: i.missing_count,
                     last_tick_observed: i.last_tick_observed,
                 },

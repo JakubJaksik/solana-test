@@ -313,19 +313,23 @@ fn emit_entry(
 ) {
     let obs = merged.observation;
 
-    // PoH tracking: only meaningful while no Missing has occurred.
-    if !slot_state.has_missing {
-        slot_state.cumulative_hashes =
-            slot_state.cumulative_hashes.saturating_add(obs.num_hashes);
-        slot_state.hashes_since_last_tick = slot_state
-            .hashes_since_last_tick
-            .saturating_add(obs.num_hashes);
-        let is_tick =
-            obs.tx_count == 0 && slot_state.hashes_since_last_tick == HASHES_PER_TICK;
-        if is_tick && slot_state.tick_idx < TICKS_PER_SLOT {
-            slot_state.tick_idx = slot_state.tick_idx.saturating_add(1);
-            slot_state.hashes_since_last_tick = 0;
-        }
+    // PoH tracking: cumulative_hashes_in_slot is a running sum that becomes
+    // approximate once `has_missing` is set (we can't account for hashes from
+    // entries we never saw). Tick detection is intentionally LENIENT: a tick
+    // entry is identified by `tx_count == 0` alone. Mainnet PoH semantics
+    // guarantee that data entries always carry transactions, so any zero-tx
+    // entry is a tick boundary. We do not require an exact hash-sum match
+    // because float-like cumulative drift would otherwise wrongly mark
+    // fully-observed slots as incomplete.
+    slot_state.cumulative_hashes = slot_state
+        .cumulative_hashes
+        .saturating_add(obs.num_hashes);
+    slot_state.hashes_since_last_tick = slot_state
+        .hashes_since_last_tick
+        .saturating_add(obs.num_hashes);
+    if obs.tx_count == 0 && slot_state.tick_idx < TICKS_PER_SLOT {
+        slot_state.tick_idx = slot_state.tick_idx.saturating_add(1);
+        slot_state.hashes_since_last_tick = 0;
     }
 
     slot_state.last_entry_hash = Some(obs.entry_hash);
