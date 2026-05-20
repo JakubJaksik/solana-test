@@ -61,8 +61,10 @@ struct FullReport {
     merger: MergerCountersSnapshot,
     ss_ordering: OrderingCountersSnapshot,
     ys_ordering: OrderingCountersSnapshot,
+    unified_ordering: OrderingCountersSnapshot,
     ss_per_slot: Vec<SlotOrderingReport>,
     ys_per_slot: Vec<SlotOrderingReport>,
+    unified_per_slot: Vec<SlotOrderingReport>,
     ss_warmup_dropped: u64,
     ys_warmup_dropped: u64,
     ss_first_full_slot: u64,
@@ -160,22 +162,15 @@ fn main() -> anyhow::Result<()> {
     let _ys_tracker_handle =
         spawn_obs_tracker("ys-ord", ys_ord_rx, ys_tracker.clone(), stop.clone());
 
-    // --- Merger output sink: just drain to keep merger from backpressuring.
-    //     We don't analyze the unified stream's ordering here. ---
-    let sink_stop = stop.clone();
-    let _sink = std::thread::Builder::new()
-        .name("merged-sink".into())
-        .spawn(move || loop {
-            if sink_stop.load(Ordering::Relaxed) {
-                break;
-            }
-            match merged_rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(_) => {}
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-            }
-        })
-        .expect("spawn merged-sink");
+    // --- Unified ordering tracker on merger output.
+    //     Per-source trackers prove each source is individually ordered.
+    //     This one shows what downstream consumers (future phases) actually
+    //     see: the merged stream may be out-of-order if SS-first arrivals
+    //     skip an entry that later only YS delivers (~9ms delay).
+    let unified_ord_counters = Arc::new(OrderingCounters::default());
+    let unified_tracker = Arc::new(OrderingTracker::new(unified_ord_counters.clone(), 5));
+    let _unified_tracker_handle =
+        spawn_merger_tracker(merged_rx, unified_tracker.clone(), stop.clone());
 
     // --- Ctrl-C ---
     let stop_for_ctrlc = stop.clone();
@@ -232,6 +227,7 @@ fn main() -> anyhow::Result<()> {
     stop.store(true, Ordering::Relaxed);
     ss_tracker.flush_all();
     ys_tracker.flush_all();
+    unified_tracker.flush_all();
 
     let total_elapsed = start.elapsed();
     let ss_drops_snap = ss_counters.snapshot();
@@ -241,8 +237,10 @@ fn main() -> anyhow::Result<()> {
         merger: merger_counters.snapshot(),
         ss_ordering: ss_ord_counters.snapshot(),
         ys_ordering: ys_ord_counters.snapshot(),
+        unified_ordering: unified_ord_counters.snapshot(),
         ss_per_slot: ss_tracker.sealed_reports(),
         ys_per_slot: ys_tracker.sealed_reports(),
+        unified_per_slot: unified_tracker.sealed_reports(),
         ss_warmup_dropped: ss_warmup_drops.load(Ordering::Relaxed),
         ys_warmup_dropped: ys_warmup_drops.load(Ordering::Relaxed),
         ss_first_full_slot: ss_first_full_slot.load(Ordering::Relaxed),
@@ -317,6 +315,9 @@ fn print_report(r: &FullReport) {
     println!();
     println!("--- YS ordering (per-source, true PoH check) ---");
     print_section(&r.ys_ordering);
+    println!();
+    println!("--- Unified ordering (merger output, what downstream sees) ---");
+    print_section(&r.unified_ordering);
     println!();
     println!("SS drops    : {}", r.ss_drops_debug);
     println!("YS drops    : {}", r.ys_drops_debug);
@@ -416,4 +417,26 @@ fn spawn_obs_tracker(
             }
         })
         .expect("spawn obs tracker")
+}
+
+fn spawn_merger_tracker(
+    rx: Receiver<MergedEntry>,
+    tracker: Arc<OrderingTracker>,
+    stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("unified-tracker".into())
+        .spawn(move || loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(merged) => {
+                    let _ = tracker.observe(&merged.observation);
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            }
+        })
+        .expect("spawn unified-tracker")
 }
