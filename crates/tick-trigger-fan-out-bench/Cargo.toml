@@ -34,3 +34,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "phase1_observe"
 path = "src/bin/phase1_observe.rs"
+
+[[bin]]
+name = "phase2_observe"
+path = "src/bin/phase2_observe.rs"
