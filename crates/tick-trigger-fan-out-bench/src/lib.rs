@@ -41,4 +41,3 @@
 
 pub mod merger;
 pub mod ordering;
-pub mod phase1_metrics;
