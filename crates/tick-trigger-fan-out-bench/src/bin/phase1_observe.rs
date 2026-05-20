@@ -1,57 +1,52 @@
 //! Phase 1 binary — verifies that SS+YS sources are reliable enough to build
 //! the rest of the pipeline on top.
 //!
-//! Usage:
-//!   phase1_observe \
-//!     --ss-url http://127.0.0.1:9999 \
-//!     --ys-url https://your-helius.com:2053 \
-//!     --ys-token <uuid> \
-//!     --duration 60s \
-//!     --output runs/phase1-20260520/report.json
+//! Architecture:
 //!
-//! The binary connects to both sources, runs the entry merger, and prints
-//! periodic (every 5s) one-line summaries. On exit (duration elapsed or Ctrl-C)
-//! it dumps a full JSON report with per-source counters, per-slot ordering
-//! breakdown, and derived percentages.
+//! ```text
+//!   SS gRPC ──▶ ss_raw_rx ──▶ ss_warmup ──▶ merger ──▶ unified_tracker
+//!   YS gRPC ──▶ ys_raw_rx ──▶ ys_warmup ──┘
+//! ```
+//!
+//! Warmup: each source drops observations until it crosses its first slot
+//! boundary. Without this, ShredStream emits a partial slot at startup where
+//! `entry_index` starts from 0 even though we joined mid-slot — making it
+//! look like SS and YS have wildly different indices for the same entry.
+//! After warmup, both sources see the next slot from its first FEC set →
+//! indices align with true PoH order → merger output is usable for ordering.
 
 use anyhow::Context;
 use clap::Parser;
-use crossbeam_channel::{bounded, Receiver};
-use entry_sources::{DropCounters, EntrySource};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use entry_sources::shredstream::grpc::ShredStreamGrpcSource;
 use entry_sources::yellowstone::YellowstoneSource;
+use entry_sources::{DropCounters, EntryObservation, EntrySource};
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tick_trigger_fan_out_bench::merger::{spawn as spawn_merger, MergedEntry, MergerConfig, MergerCounters};
+use tick_trigger_fan_out_bench::merger::{
+    spawn as spawn_merger, MergedEntry, MergerConfig, MergerCounters,
+};
 use tick_trigger_fan_out_bench::ordering::{OrderingCounters, OrderingTracker, SlotOrderingReport};
 use tick_trigger_fan_out_bench::phase1_metrics::{build_report, one_line, Phase1Report};
 
 #[derive(Parser)]
 #[command(version, about = "Phase 1: verify SS+YS source reliability")]
 struct Args {
-    /// ShredStream gRPC URL (e.g. http://127.0.0.1:9999).
     #[arg(long, env = "SS_URL")]
     ss_url: String,
-    /// Yellowstone gRPC URL (e.g. https://provider.example:2053).
     #[arg(long, env = "YS_URL")]
     ys_url: String,
-    /// Yellowstone auth token / API key (UUID).
     #[arg(long, env = "YS_TOKEN", default_value = "")]
     ys_token: String,
-    /// How long to observe (humantime, e.g. 60s, 5m).
     #[arg(long, default_value = "60s")]
     duration: humantime::Duration,
-    /// Where to write the final JSON report. Optional; if omitted the report
-    /// is still printed to stdout on shutdown.
     #[arg(long)]
     output: Option<PathBuf>,
-    /// Channel capacity for the SS/YS receivers.
     #[arg(long, default_value_t = 65536)]
     source_channel_capacity: usize,
-    /// How often (seconds) to print a one-line summary during the run.
     #[arg(long, default_value_t = 5)]
     summary_interval_secs: u64,
 }
@@ -60,8 +55,10 @@ struct Args {
 struct FullReport {
     summary: Phase1Report,
     per_slot: Vec<SlotOrderingReport>,
-    /// String dumps of the SS/YS drop counters (their snapshot type does not
-    /// derive `Serialize`, so we use Debug-format here).
+    ss_warmup_dropped: u64,
+    ys_warmup_dropped: u64,
+    ss_first_full_slot: u64,
+    ys_first_full_slot: u64,
     ss_drops_debug: String,
     ys_drops_debug: String,
 }
@@ -78,60 +75,112 @@ fn main() -> anyhow::Result<()> {
     let duration: Duration = args.duration.into();
     tracing::info!(?duration, ss_url = %args.ss_url, ys_url = %args.ys_url, "phase1_observe starting");
 
-    // --- Sources ---
+    // --- Raw sources ---
     let ss_counters = Arc::new(DropCounters::default());
-    let ss_src = Box::new(ShredStreamGrpcSource {
+    let ss_raw_rx = Box::new(ShredStreamGrpcSource {
         endpoint: args.ss_url.clone(),
         channel_capacity: args.source_channel_capacity,
         pinned_core: None,
         counters: ss_counters.clone(),
-    });
-    let ss_rx = ss_src.start().context("start shredstream source")?;
+    })
+    .start()
+    .context("start shredstream source")?;
     tracing::info!("shredstream source started");
 
     let ys_counters = Arc::new(DropCounters::default());
-    let ys_src = Box::new(YellowstoneSource {
+    let ys_raw_rx = Box::new(YellowstoneSource {
         url: args.ys_url.clone(),
-        token: if args.ys_token.is_empty() { None } else { Some(args.ys_token.clone()) },
+        token: if args.ys_token.is_empty() {
+            None
+        } else {
+            Some(args.ys_token.clone())
+        },
         channel_capacity: args.source_channel_capacity,
         pinned_core: None,
         counters: ys_counters.clone(),
-    });
-    let ys_rx = ys_src.start().context("start yellowstone source")?;
+    })
+    .start()
+    .context("start yellowstone source")?;
     tracing::info!("yellowstone source started");
 
-    // --- Merger ---
+    let stop = Arc::new(AtomicBool::new(false));
+
+    // --- Per-source warmup-skip:
+    // Each warmup thread drops the source's first (partial) slot. The first
+    // FULL slot starts when we observe slot > startup_slot. This guarantees
+    // SS sees the slot from its first FEC set, so its cumulative entry_index
+    // aligns with the true PoH index that YS reports.
+    let (ss_clean_tx, ss_clean_rx) = bounded::<EntryObservation>(args.source_channel_capacity);
+    let ss_warmup_drops = Arc::new(AtomicU64::new(0));
+    let ss_first_full_slot = Arc::new(AtomicU64::new(0));
+    let _ss_warmup_handle = spawn_warmup(
+        "ss-warmup",
+        ss_raw_rx,
+        ss_clean_tx,
+        ss_warmup_drops.clone(),
+        ss_first_full_slot.clone(),
+        stop.clone(),
+    );
+
+    let (ys_clean_tx, ys_clean_rx) = bounded::<EntryObservation>(args.source_channel_capacity);
+    let ys_warmup_drops = Arc::new(AtomicU64::new(0));
+    let ys_first_full_slot = Arc::new(AtomicU64::new(0));
+    let _ys_warmup_handle = spawn_warmup(
+        "ys-warmup",
+        ys_raw_rx,
+        ys_clean_tx,
+        ys_warmup_drops.clone(),
+        ys_first_full_slot.clone(),
+        stop.clone(),
+    );
+
+    // --- Merger over warmed-up streams ---
     let (merged_tx, merged_rx) = bounded::<MergedEntry>(args.source_channel_capacity);
     let merger_counters = Arc::new(MergerCounters::new());
-    let stop = Arc::new(AtomicBool::new(false));
     let _merger_handle = spawn_merger(MergerConfig {
-        ss_rx,
-        ys_rx,
+        ss_rx: ss_clean_rx,
+        ys_rx: ys_clean_rx,
         out_tx: merged_tx,
         counters: merger_counters.clone(),
         stop: stop.clone(),
     })?;
     tracing::info!("entry-merger spawned");
 
-    // --- Ordering tracker (consumes primary emissions) ---
+    // --- Ordering tracker on the unified merger output ---
     let ordering_counters = Arc::new(OrderingCounters::default());
     let tracker = Arc::new(OrderingTracker::new(ordering_counters.clone(), 5));
     let tracker_handle = spawn_tracker(merged_rx, tracker.clone(), stop.clone());
 
-    // --- Ctrl-C handler ---
+    // --- Ctrl-C ---
     let stop_for_ctrlc = stop.clone();
     ctrlc::set_handler(move || {
         tracing::info!("Ctrl-C received, signalling shutdown");
         stop_for_ctrlc.store(true, Ordering::Relaxed);
-    }).ok();
+    })
+    .ok();
 
-    // --- Main loop: periodic one-line summaries until duration elapses or stop. ---
+    // --- Main loop ---
     let start = Instant::now();
     let mut next_summary = start + Duration::from_secs(args.summary_interval_secs);
+    let mut announced_warmup = false;
     while !stop.load(Ordering::Relaxed) {
         let now = Instant::now();
         if now >= start + duration {
             break;
+        }
+        if !announced_warmup {
+            let ss_ready = ss_first_full_slot.load(Ordering::Relaxed) > 0;
+            let ys_ready = ys_first_full_slot.load(Ordering::Relaxed) > 0;
+            if ss_ready && ys_ready {
+                announced_warmup = true;
+                tracing::info!(
+                    ss_first_full_slot = ss_first_full_slot.load(Ordering::Relaxed),
+                    ys_first_full_slot = ys_first_full_slot.load(Ordering::Relaxed),
+                    ss_warmup_dropped = ss_warmup_drops.load(Ordering::Relaxed),
+                    ys_warmup_dropped = ys_warmup_drops.load(Ordering::Relaxed),
+                    "warmup complete — both sources past their first slot boundary"
+                );
+            }
         }
         if now >= next_summary {
             next_summary = now + Duration::from_secs(args.summary_interval_secs);
@@ -147,10 +196,8 @@ fn main() -> anyhow::Result<()> {
 
     stop.store(true, Ordering::Relaxed);
     let _ = tracker_handle.join();
-
-    // Flush any in-progress slots that didn't get a high-water seal during the run.
-    let final_flush = tracker.flush_all();
-    tracing::info!(flushed_slots = final_flush.len(), "flushed remaining in-progress slots");
+    let flushed = tracker.flush_all().len();
+    tracing::info!(flushed_slots = flushed, "flushed remaining in-progress slots");
 
     let total_elapsed = start.elapsed();
     let final_summary = build_report(
@@ -164,62 +211,15 @@ fn main() -> anyhow::Result<()> {
     let full = FullReport {
         summary: final_summary.clone(),
         per_slot: tracker.sealed_reports(),
+        ss_warmup_dropped: ss_warmup_drops.load(Ordering::Relaxed),
+        ys_warmup_dropped: ys_warmup_drops.load(Ordering::Relaxed),
+        ss_first_full_slot: ss_first_full_slot.load(Ordering::Relaxed),
+        ys_first_full_slot: ys_first_full_slot.load(Ordering::Relaxed),
         ss_drops_debug: format!("{:?}", ss_drops_snap),
         ys_drops_debug: format!("{:?}", ys_drops_snap),
     };
 
-    println!("\n=== PHASE 1 FINAL REPORT ===");
-    println!("{}", one_line(&final_summary));
-    println!();
-    println!("SS receive total       : {}", final_summary.merger.ss_received);
-    println!("YS receive total       : {}", final_summary.merger.ys_received);
-    println!("Unique entries (primary): {}", final_summary.derived.unique_entries);
-    println!(
-        "  SS first              : {} ({:.1}%)",
-        final_summary.merger.ss_first, final_summary.derived.ss_first_rate * 100.0
-    );
-    println!(
-        "  YS first              : {} ({:.1}%)",
-        final_summary.merger.ys_first, (1.0 - final_summary.derived.ss_first_rate) * 100.0
-    );
-    println!(
-        "Both sources confirmed : {} ({:.1}%)",
-        final_summary.derived.both_sources_confirmed,
-        final_summary.derived.both_confirm_rate * 100.0
-    );
-    if let Some(avg_us) = final_summary.derived.confirm_latency_avg_us {
-        println!(
-            "Inter-source latency   : avg={:.0}us min={:.0}us max={:.0}us",
-            avg_us,
-            final_summary.derived.confirm_latency_min_us.unwrap_or(0.0),
-            final_summary.derived.confirm_latency_max_us.unwrap_or(0.0),
-        );
-    } else {
-        println!("Inter-source latency   : (no confirmations yet)");
-    }
-    println!("Duplicates dropped     : {}", final_summary.merger.duplicates);
-    println!("Merger out_tx full     : {}", final_summary.merger.output_full);
-    println!();
-    println!("Slots sealed           : {}", final_summary.ordering.slots_sealed);
-    println!(
-        "  fully ordered         : {} ({:.1}%)",
-        final_summary.ordering.slots_fully_ordered, final_summary.derived.fully_ordered_rate * 100.0
-    );
-    println!(
-        "  with disorder         : {} (avg out-of-order per slot: {:.2})",
-        final_summary.ordering.slots_with_disorder, final_summary.derived.avg_out_of_order_per_slot
-    );
-    println!(
-        "  with index gaps       : {} (total missing: {})",
-        final_summary.ordering.slots_with_gaps, final_summary.ordering.total_missing_indices
-    );
-    println!(
-        "  ended on tick (64 .)  : {} ({:.1}%)",
-        final_summary.ordering.slots_ending_on_tick, final_summary.derived.tick_ending_rate * 100.0
-    );
-    println!();
-    println!("SS source drops        : {}", full.ss_drops_debug);
-    println!("YS source drops        : {}", full.ys_drops_debug);
+    print_report(&final_summary, &full);
 
     if let Some(path) = &args.output {
         if let Some(parent) = path.parent() {
@@ -233,6 +233,120 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn print_report(final_summary: &Phase1Report, full: &FullReport) {
+    println!("\n=== PHASE 1 FINAL REPORT ===");
+    println!("{}", one_line(final_summary));
+    println!();
+    println!("--- Warmup ---");
+    println!("SS warmup dropped       : {} (waited until slot >{})", full.ss_warmup_dropped, full.ss_first_full_slot.saturating_sub(1));
+    println!("YS warmup dropped       : {} (waited until slot >{})", full.ys_warmup_dropped, full.ys_first_full_slot.saturating_sub(1));
+    println!();
+    println!("--- Receive / dedup ---");
+    println!("SS receive total       : {}", final_summary.merger.ss_received);
+    println!("YS receive total       : {}", final_summary.merger.ys_received);
+    println!(
+        "Unique entries         : {}    (SS+YS first-sightings)",
+        final_summary.derived.unique_entries
+    );
+    println!(
+        "  SS won the race      : {} ({:.1}%)",
+        final_summary.merger.ss_first,
+        final_summary.derived.ss_first_rate * 100.0
+    );
+    println!(
+        "  YS won the race      : {} ({:.1}%)",
+        final_summary.merger.ys_first,
+        (1.0 - final_summary.derived.ss_first_rate) * 100.0
+    );
+    println!(
+        "Both sources saw entry : {} ({:.1}% of unique)",
+        final_summary.derived.both_sources_confirmed,
+        final_summary.derived.both_confirm_rate * 100.0
+    );
+    if let Some(avg_us) = final_summary.derived.confirm_latency_avg_us {
+        println!(
+            "Inter-source latency   : avg={:.0}us min={:.0}us max={:.0}us",
+            avg_us,
+            final_summary.derived.confirm_latency_min_us.unwrap_or(0.0),
+            final_summary.derived.confirm_latency_max_us.unwrap_or(0.0),
+        );
+    }
+    println!("Duplicates dropped     : {}", final_summary.merger.duplicates);
+    println!("Merger out_tx full     : {}", final_summary.merger.output_full);
+    println!();
+    println!("--- Ordering (merger output) ---");
+    println!("Slots sealed           : {}", final_summary.ordering.slots_sealed);
+    println!(
+        "  fully ordered         : {} ({:.1}%)",
+        final_summary.ordering.slots_fully_ordered,
+        final_summary.derived.fully_ordered_rate * 100.0
+    );
+    println!(
+        "  with disorder         : {} (avg ooo/slot: {:.2})",
+        final_summary.ordering.slots_with_disorder, final_summary.derived.avg_out_of_order_per_slot
+    );
+    println!(
+        "  with index gaps       : {} (total missing: {})",
+        final_summary.ordering.slots_with_gaps, final_summary.ordering.total_missing_indices
+    );
+    println!(
+        "  ended on tick         : {} ({:.1}%)",
+        final_summary.ordering.slots_ending_on_tick, final_summary.derived.tick_ending_rate * 100.0
+    );
+    println!();
+    println!("SS source drops        : {}", full.ss_drops_debug);
+    println!("YS source drops        : {}", full.ys_drops_debug);
+}
+
+/// Warmup wrapper: drops every observation belonging to the source's first
+/// (partial) slot. Forwarding starts the moment we see slot > first_seen.
+/// `first_full_slot` is set to the first slot we forward, for reporting.
+fn spawn_warmup(
+    name: &'static str,
+    rx: Receiver<EntryObservation>,
+    tx: Sender<EntryObservation>,
+    dropped: Arc<AtomicU64>,
+    first_full_slot: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            let mut startup_slot: Option<u64> = None;
+            let mut warm = false;
+            loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                match rx.recv_timeout(Duration::from_millis(200)) {
+                    Ok(obs) => {
+                        if warm {
+                            let _ = tx.try_send(obs);
+                            continue;
+                        }
+                        match startup_slot {
+                            None => {
+                                startup_slot = Some(obs.slot);
+                                dropped.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Some(s0) if obs.slot <= s0 => {
+                                dropped.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Some(_) => {
+                                warm = true;
+                                first_full_slot.store(obs.slot, Ordering::Relaxed);
+                                let _ = tx.try_send(obs);
+                            }
+                        }
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        })
+        .expect("spawn warmup")
+}
+
 fn spawn_tracker(
     rx: Receiver<MergedEntry>,
     tracker: Arc<OrderingTracker>,
@@ -240,20 +354,16 @@ fn spawn_tracker(
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("ordering-tracker".into())
-        .spawn(move || {
-            loop {
-                if stop.load(Ordering::Relaxed) {
-                    break;
+        .spawn(move || loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(merged) => {
+                    let _ = tracker.observe(&merged.observation);
                 }
-                match rx.recv_timeout(Duration::from_millis(200)) {
-                    Ok(merged) => {
-                        // Merger emits exactly one MergedEntry per unique (slot, hash) —
-                        // feed every emission to the ordering tracker.
-                        tracker.observe(&merged.observation);
-                    }
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
             }
         })
         .expect("spawn ordering-tracker thread")
