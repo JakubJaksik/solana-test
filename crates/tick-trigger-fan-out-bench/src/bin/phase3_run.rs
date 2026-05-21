@@ -45,15 +45,18 @@ use tick_trigger_fan_out_bench::merger::{
 use tick_trigger_fan_out_bench::poh_supervisor::{
     spawn as spawn_supervisor, OrderedEvent, PohSupervisorConfig, PohSupervisorCounters,
 };
+use tick_trigger_fan_out_bench::preparer::{
+    spawn as spawn_preparer, PreparerConfig, PreparerCounters,
+};
 use tick_trigger_fan_out_bench::recorder::{
     spawn as spawn_recorder, RecorderConfig, RecorderCounters, RegisterEvent, SendEvent,
 };
-use tick_trigger_fan_out_bench::schedule::Schedule;
+use tick_trigger_fan_out_bench::schedule::{Schedule, ScheduleEntry};
 use tick_trigger_fan_out_bench::senders::{helius::HeliusSender, TxSender};
 use tick_trigger_fan_out_bench::trigger_engine::{
     spawn as spawn_engine, MatchEvent, TriggerEngineConfig, TriggerEngineCounters, TriggerEvent,
 };
-use tick_trigger_fan_out_bench::tx_builder;
+use tick_trigger_fan_out_bench::tx_pool::TxPool;
 use tick_trigger_fan_out_bench::wallet;
 use tokio::runtime::Builder as TokioRtBuilder;
 
@@ -157,24 +160,28 @@ fn main() -> anyhow::Result<()> {
         stop: stop.clone(),
     })?;
 
-    // Schedule — live ArcSwap snapshot + pump thread.
+    // Schedule — live ArcSwap snapshot for engine + channel feed for preparer.
     let schedule_snapshot: Arc<ArcSwap<HashSet<(u64, u8)>>> =
         Arc::new(ArcSwap::from_pointee(HashSet::new()));
     let pending_sigs: Arc<DashSet<Signature>> = Arc::new(DashSet::new());
+    let (preparer_schedule_tx, preparer_schedule_rx) =
+        bounded::<ScheduleEntry>(cfg.sources.channel_capacity);
     let schedule_pump_stop = stop.clone();
     let schedule_snapshot_for_pump = schedule_snapshot.clone();
     let schedule_seed = cfg.schedule.seed;
     let chunk_size = cfg.schedule.chunk_size_slots;
     let triggers_per_slot = cfg.run.triggers_per_slot;
+    let lead_slots = cfg.schedule.lead_slots;
     std::thread::Builder::new()
         .name("schedule-pump".into())
         .spawn(move || {
             let mut sched = Schedule::new(schedule_seed, start_slot, chunk_size, triggers_per_slot);
             let mut accumulated: HashSet<(u64, u8)> = HashSet::new();
-            // Pre-seed ~lead_slots ahead so the engine has schedule on day one.
-            for _ in 0..((cfg.schedule.lead_slots / chunk_size).max(1) + 1) {
+            // Pre-seed ~lead_slots ahead so engine + preparer have work to do.
+            for _ in 0..((lead_slots / chunk_size).max(1) + 1) {
                 for e in sched.next_chunk() {
                     accumulated.insert((e.slot, e.tick));
+                    let _ = preparer_schedule_tx.try_send(e);
                 }
             }
             schedule_snapshot_for_pump.store(Arc::new(accumulated.clone()));
@@ -185,6 +192,7 @@ fn main() -> anyhow::Result<()> {
                 std::thread::sleep(Duration::from_secs(2));
                 for e in sched.next_chunk() {
                     accumulated.insert((e.slot, e.tick));
+                    let _ = preparer_schedule_tx.try_send(e);
                 }
                 schedule_snapshot_for_pump.store(Arc::new(accumulated.clone()));
             }
@@ -212,26 +220,50 @@ fn main() -> anyhow::Result<()> {
         stop.clone(),
     );
 
-    // Senders (currently expects exactly 1 enabled; future phases will iterate).
-    let enabled: Vec<_> = cfg.senders.iter().filter(|s| s.enabled).collect();
-    if enabled.is_empty() {
+    // Live current_slot (used by preparer to evict pool entries for past slots).
+    // The main loop polls RPC and updates this every ~5s.
+    let current_slot = Arc::new(AtomicU64::new(start_slot));
+
+    // Tx pool + Preparer (signs txs ahead of fire time so hot path has zero
+    // signing cost — just a DashMap lookup).
+    let tx_pool = Arc::new(TxPool::new());
+    let preparer_counters = Arc::new(PreparerCounters::default());
+
+    // Senders: build Arc<dyn TxSender> per enabled SenderConfig.
+    // For phase 3+ supports multiple — dispatcher fans out to all variants
+    // produced by the preparer (one per sender) in a shuffled order.
+    let enabled_senders: Vec<_> =
+        cfg.senders.iter().filter(|s| s.enabled).cloned().collect();
+    if enabled_senders.is_empty() {
         anyhow::bail!("no enabled senders in config");
     }
-    if enabled.len() > 1 {
-        tracing::warn!(
-            "phase 3 currently uses only the FIRST enabled sender; multi-sender comes in phase 4. ignoring {} others",
-            enabled.len() - 1
-        );
+    let mut senders_by_id: std::collections::HashMap<u8, Arc<dyn TxSender>> =
+        std::collections::HashMap::new();
+    for sc in &enabled_senders {
+        let s: Arc<dyn TxSender> = match sc.kind {
+            SenderKind::Helius => Arc::new(HeliusSender::new(
+                sc.id, sc.name.clone(), sc.endpoint_url.clone(),
+            )),
+        };
+        tracing::info!(id = sc.id, name = %s.name(), endpoint = %s.endpoint_url(),
+            tip_lamports = sc.tip_lamports, "sender configured");
+        senders_by_id.insert(sc.id, s);
     }
-    let sender_cfg = enabled[0].clone();
-    let sender: Arc<dyn TxSender> = match sender_cfg.kind {
-        SenderKind::Helius => Arc::new(HeliusSender::new(
-            sender_cfg.id,
-            sender_cfg.name.clone(),
-            sender_cfg.endpoint_url.clone(),
-        )),
-    };
-    tracing::info!(name = %sender.name(), endpoint = %sender.endpoint_url(), "sender configured");
+
+    // Spawn preparer with full sender list — it signs one variant per sender
+    // per trigger, shuffled deterministically by (schedule_seed, slot, tick).
+    let _preparer = spawn_preparer(PreparerConfig {
+        schedule_rx: preparer_schedule_rx,
+        pool: tx_pool.clone(),
+        keypair: keypair.clone(),
+        blockhash_cache: bh_runner.cache.clone(),
+        tx_cfg: cfg.tx.clone(),
+        senders: enabled_senders.clone(),
+        shuffle_seed: cfg.schedule.seed.unwrap_or(0xDEADBEEF),
+        current_slot: current_slot.clone(),
+        counters: preparer_counters.clone(),
+        stop: stop.clone(),
+    })?;
 
     // Recorder.
     let (register_tx, register_rx) = bounded::<RegisterEvent>(8192);
@@ -250,34 +282,42 @@ fn main() -> anyhow::Result<()> {
         stop: stop.clone(),
     })?;
 
-    // Dispatcher thread: own tokio runtime, drains trigger_rx and sends.
+    // Dispatcher: drains trigger_rx, takes pre-signed Vec<PreSignedTx> from
+    // pool (already shuffled by preparer), fans out async send to each
+    // sender in vec order. On pool miss, falls back to building inline
+    // (single-variant, first enabled sender) so we never miss a fire.
     let dispatcher_stop = stop.clone();
-    let dispatcher_keypair = keypair.clone();
     let dispatcher_pending = pending_sigs.clone();
-    let dispatcher_tx_cfg = cfg.tx.clone();
-    let dispatcher_sender_cfg = sender_cfg.clone();
-    let dispatcher_sender = sender.clone();
-    let dispatcher_bh = bh_runner.cache.clone();
+    let dispatcher_senders_by_id = senders_by_id.clone();
+    let dispatcher_senders_cfg = enabled_senders.clone();
+    let dispatcher_pool = tx_pool.clone();
     let dispatcher_register_tx = register_tx.clone();
     let dispatcher_send_tx = send_event_tx.clone();
+    let dispatcher_keypair = keypair.clone();
+    let dispatcher_bh = bh_runner.cache.clone();
+    let dispatcher_tx_cfg = cfg.tx.clone();
+    let dispatcher_counters = Arc::new(DispatcherCounters::default());
+    let dispatcher_counters_clone = dispatcher_counters.clone();
     std::thread::Builder::new()
         .name("dispatcher".into())
         .spawn(move || {
             let rt = TokioRtBuilder::new_multi_thread()
-                .worker_threads(2)
+                .worker_threads(4)
                 .enable_all()
                 .build()
                 .expect("tokio rt");
             rt.block_on(dispatcher_loop(
                 trigger_rx,
-                dispatcher_keypair,
                 dispatcher_pending,
-                dispatcher_tx_cfg,
-                dispatcher_sender_cfg,
-                dispatcher_sender,
+                dispatcher_senders_cfg,
+                dispatcher_senders_by_id,
+                dispatcher_pool,
+                dispatcher_keypair,
                 dispatcher_bh,
+                dispatcher_tx_cfg,
                 dispatcher_register_tx,
                 dispatcher_send_tx,
+                dispatcher_counters_clone,
                 dispatcher_stop,
             ));
         })?;
@@ -322,6 +362,13 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        // Refresh current_slot from RPC every ~5s so preparer can evict
+        // pool entries for slots that already passed without firing.
+        if now.duration_since(last_balance_check).as_secs() % 5 == 0 {
+            if let Ok(s) = rpc.get_slot() {
+                current_slot.store(s, Ordering::Relaxed);
+            }
+        }
         std::thread::sleep(Duration::from_millis(200));
     }
     tracing::info!("shutdown");
@@ -353,6 +400,27 @@ fn main() -> anyhow::Result<()> {
     println!("Slots complete     : {}", s.slots_complete);
     println!("Slots incomplete   : {}", s.slots_incomplete);
     println!();
+    println!("--- Preparer ---");
+    let pp = preparer_counters.snapshot();
+    println!("Triggers prepared     : {}", pp.triggers_prepared);
+    println!("Variants signed       : {}", pp.variants_signed);
+    println!("Blockhash not ready   : {}", pp.blockhash_not_ready);
+    println!("Signing errors        : {}", pp.signing_errors);
+    println!("Pool evictions        : {}", pp.pool_evictions);
+    println!();
+    println!("--- Dispatcher ---");
+    let pool_hits = dispatcher_counters.pool_hits.load(Ordering::Relaxed);
+    let pool_misses_built =
+        dispatcher_counters.pool_misses_fallback_built.load(Ordering::Relaxed);
+    let pool_misses_skipped =
+        dispatcher_counters.pool_misses_skipped_no_blockhash.load(Ordering::Relaxed);
+    let total = pool_hits + pool_misses_built + pool_misses_skipped;
+    println!("Pool hits             : {} ({:.1}%)", pool_hits,
+        if total > 0 { pool_hits as f64 / total as f64 * 100.0 } else { 0.0 });
+    println!("Pool miss → fallback  : {} ({:.1}%)", pool_misses_built,
+        if total > 0 { pool_misses_built as f64 / total as f64 * 100.0 } else { 0.0 });
+    println!("Pool miss → skipped   : {}", pool_misses_skipped);
+    println!();
     println!("--- Trigger engine ---");
     println!("Entries seen       : {}", e.entries_seen);
     println!("Schedule hits      : {}", e.schedule_hits);
@@ -372,19 +440,43 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Default)]
+struct DispatcherCounters {
+    pool_hits: AtomicU64,
+    pool_misses_fallback_built: AtomicU64,
+    pool_misses_skipped_no_blockhash: AtomicU64,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatcher_loop(
     trigger_rx: Receiver<TriggerEvent>,
-    keypair: Arc<solana_sdk::signature::Keypair>,
     pending_sigs: Arc<DashSet<Signature>>,
-    tx_cfg: tick_trigger_fan_out_bench::config::TxConfig,
-    sender_cfg: tick_trigger_fan_out_bench::config::SenderConfig,
-    sender: Arc<dyn TxSender>,
+    senders_cfg: Vec<tick_trigger_fan_out_bench::config::SenderConfig>,
+    senders_by_id: std::collections::HashMap<u8, Arc<dyn TxSender>>,
+    pool: Arc<TxPool>,
+    keypair: Arc<solana_sdk::signature::Keypair>,
     bh_cache: Arc<tick_trigger_fan_out_bench::blockhash_cache::BlockhashCache>,
+    tx_cfg: tick_trigger_fan_out_bench::config::TxConfig,
     register_tx: Sender<RegisterEvent>,
     send_event_tx: Sender<SendEvent>,
+    counters: Arc<DispatcherCounters>,
     stop: Arc<AtomicBool>,
 ) {
+    use tick_trigger_fan_out_bench::tip_accounts::{tip_accounts_for, TipAccountRotator};
+    use tick_trigger_fan_out_bench::tx_builder;
+    use tick_trigger_fan_out_bench::tx_pool::PreSignedTx;
+
+    // Per-sender tip rotator for the fallback (pool-miss) path.
+    let fallback_rotators: std::collections::HashMap<u8, Arc<TipAccountRotator>> = senders_cfg
+        .iter()
+        .map(|s| {
+            (
+                s.id,
+                Arc::new(TipAccountRotator::new(tip_accounts_for(s.kind).to_vec())),
+            )
+        })
+        .collect();
+
     loop {
         if stop.load(Ordering::Relaxed) {
             break;
@@ -394,51 +486,109 @@ async fn dispatcher_loop(
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         };
-        if bh_cache.is_empty() {
-            tracing::warn!(trigger_slot = trig.slot, tick = trig.tick, "blockhash not yet primed — skipping trigger");
-            continue;
-        }
-        let bh = bh_cache.current();
-        let prepared_at = Instant::now();
-        let built = tx_builder::build(tx_builder::BuildParams {
-            payer: &keypair,
-            blockhash: bh,
-            sender_id: sender_cfg.id,
-            tip_account: None, // phase 3: no tip account — pure self-transfer
-            tip_lamports: sender_cfg.tip_lamports,
-            tx_cfg: &tx_cfg,
-        });
-        let sig = built.signature;
-        pending_sigs.insert(sig);
 
-        let reg = RegisterEvent {
-            trigger_id: trig.trigger_id,
-            sender_id: sender_cfg.id,
-            sender_name: sender_cfg.name.clone(),
-            endpoint_url: sender_cfg.endpoint_url.clone(),
-            protocol: sender.protocol().to_string(),
-            signature: sig,
-            slot: trig.slot,
-            tick: trig.tick,
-            trigger_observed_at: trig.trigger_observed_at,
-            prepared_at,
-            blockhash: bh,
+        // Take pre-signed variants (already shuffled by preparer). On miss
+        // we synthesise a single-sender fallback vec so the loop logic is
+        // unified.
+        let variants: Vec<PreSignedTx> = match pool.take(trig.slot, trig.tick) {
+            Some(v) => {
+                counters.pool_hits.fetch_add(1, Ordering::Relaxed);
+                v
+            }
+            None => {
+                if bh_cache.is_empty() {
+                    counters
+                        .pool_misses_skipped_no_blockhash
+                        .fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        slot = trig.slot, tick = trig.tick,
+                        "pool miss AND blockhash not primed — skipping trigger"
+                    );
+                    continue;
+                }
+                counters
+                    .pool_misses_fallback_built
+                    .fetch_add(1, Ordering::Relaxed);
+                let bh = bh_cache.current();
+                // Build one variant per enabled sender, no shuffle (rare path).
+                let mut v = Vec::with_capacity(senders_cfg.len());
+                for sc in &senders_cfg {
+                    let tip = if sc.tip_lamports > 0 {
+                        fallback_rotators
+                            .get(&sc.id)
+                            .and_then(|r| r.next())
+                    } else {
+                        None
+                    };
+                    let built = tx_builder::build(tx_builder::BuildParams {
+                        payer: &keypair,
+                        blockhash: bh,
+                        sender_id: sc.id,
+                        trigger_id: trig.trigger_id.0,
+                        tip_account: tip,
+                        tip_lamports: sc.tip_lamports,
+                        tx_cfg: &tx_cfg,
+                    });
+                    v.push(PreSignedTx {
+                        sender_id: sc.id,
+                        tx: Arc::new(built.tx),
+                        signature: built.signature,
+                        blockhash: bh,
+                        prepared_at: Instant::now(),
+                    });
+                }
+                v
+            }
         };
-        let _ = register_tx.try_send(reg);
 
-        let sender_for_task = sender.clone();
-        let send_tx_for_task = send_event_tx.clone();
-        let tx_for_task = built.tx;
-        let trigger_id = trig.trigger_id;
-        let sender_id = sender_cfg.id;
-        tokio::spawn(async move {
-            let outcome = sender_for_task.send(&tx_for_task).await;
-            let _ = send_tx_for_task.try_send(SendEvent {
-                trigger_id,
-                sender_id,
-                outcome,
+        // Fan out: emit RegisterEvent + spawn async send for each variant.
+        let send_order = variants.len();
+        for (order_idx, presigned) in variants.into_iter().enumerate() {
+            let sig = presigned.signature;
+            pending_sigs.insert(sig);
+
+            let sender_cfg = senders_cfg
+                .iter()
+                .find(|s| s.id == presigned.sender_id)
+                .cloned();
+            let Some(sender_cfg) = sender_cfg else { continue };
+            let Some(sender) = senders_by_id.get(&presigned.sender_id).cloned() else {
+                continue;
+            };
+
+            let reg = RegisterEvent {
+                trigger_id: trig.trigger_id,
+                sender_id: sender_cfg.id,
+                sender_name: sender_cfg.name.clone(),
+                endpoint_url: sender_cfg.endpoint_url.clone(),
+                protocol: sender.protocol().to_string(),
+                signature: sig,
+                slot: trig.slot,
+                tick: trig.tick,
+                trigger_observed_at: trig.trigger_observed_at,
+                prepared_at: presigned.prepared_at,
+                blockhash: presigned.blockhash,
+            };
+            let _ = register_tx.try_send(reg);
+
+            let sender_for_task = sender.clone();
+            let send_tx_for_task = send_event_tx.clone();
+            let tx_for_task = presigned.tx;
+            let trigger_id = trig.trigger_id;
+            let sender_id = sender_cfg.id;
+            tokio::spawn(async move {
+                let outcome = sender_for_task.send(&tx_for_task).await;
+                let _ = send_tx_for_task.try_send(SendEvent {
+                    trigger_id,
+                    sender_id,
+                    outcome,
+                });
             });
-        });
+            // We don't actually need order_idx outside metrics; suppress
+            // unused-variable noise without losing intent.
+            let _ = order_idx;
+        }
+        let _ = send_order;
     }
 }
 

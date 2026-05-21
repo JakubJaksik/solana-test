@@ -51,6 +51,10 @@ pub struct BuildParams<'a> {
     pub payer: &'a Keypair,
     pub blockhash: Hash,
     pub sender_id: u8,
+    /// Per-trigger unique value. Embedded into the memo so two triggers
+    /// within the same blockhash window produce DIFFERENT signed txs,
+    /// avoiding "already processed" silent drops on chain.
+    pub trigger_id: u64,
     pub tip_account: Option<Pubkey>,
     pub tip_lamports: u64,
     pub tx_cfg: &'a TxConfig,
@@ -73,12 +77,18 @@ pub fn build(params: BuildParams<'_>) -> BuiltTx {
             params.tx_cfg.priority_fee_microlamports,
         ));
     }
-    // Memo: 1-byte payload identifying which sender produced this variant.
-    let memo_byte = memo_byte_for_sender(params.sender_id);
+    // Memo: 1 byte sender_id + 8 bytes trigger_id (LE u64).
+    // Per-trigger uniqueness is critical when sharing a recent blockhash
+    // across multiple triggers — otherwise identical instruction content
+    // produces identical signed txs that on-chain dedupes as "already
+    // processed", causing silent second-trigger drops.
+    let mut memo_data = Vec::with_capacity(9);
+    memo_data.push(memo_byte_for_sender(params.sender_id));
+    memo_data.extend_from_slice(&params.trigger_id.to_le_bytes());
     ixs.push(Instruction {
         program_id: memo_program_id(),
         accounts: vec![AccountMeta::new_readonly(payer_pk, true)],
-        data: vec![memo_byte],
+        data: memo_data,
     });
     // Tip transfer if configured.
     if let Some(tip) = params.tip_account {
@@ -149,6 +159,7 @@ mod tests {
             payer: &payer,
             blockhash: bh,
             sender_id: 0,
+            trigger_id: 12345,
             tip_account: Some(tip),
             tip_lamports: 1000,
             tx_cfg: &cfg,
@@ -167,6 +178,7 @@ mod tests {
             payer: &payer,
             blockhash: Hash::new_unique(),
             sender_id: 0,
+            trigger_id: 12345,
             tip_account: None,
             tip_lamports: 0,
             tx_cfg: &cfg,
@@ -184,11 +196,31 @@ mod tests {
             payer: &payer,
             blockhash: Hash::new_unique(),
             sender_id: 0,
+            trigger_id: 12345,
             tip_account: None,
             tip_lamports: 0,
             tx_cfg: &cfg,
         });
         // 3 ixs (no priority fee, no tip): SetCULimit, Memo, Self transfer.
         assert_eq!(built.tx.message.instructions.len(), 3);
+    }
+
+    #[test]
+    fn distinct_trigger_ids_produce_distinct_signatures() {
+        // Same blockhash + sender — different trigger_id MUST yield different
+        // signed tx (this is the property that prevents on-chain "already
+        // processed" silent drops when triggers share a blockhash window).
+        let payer = Keypair::new();
+        let cfg = cfg();
+        let bh = Hash::new_unique();
+        let a = build(BuildParams {
+            payer: &payer, blockhash: bh, sender_id: 0, trigger_id: 1,
+            tip_account: None, tip_lamports: 0, tx_cfg: &cfg,
+        });
+        let b = build(BuildParams {
+            payer: &payer, blockhash: bh, sender_id: 0, trigger_id: 2,
+            tip_account: None, tip_lamports: 0, tx_cfg: &cfg,
+        });
+        assert_ne!(a.signature, b.signature);
     }
 }
