@@ -186,6 +186,16 @@ fn run_loop(cfg: TriggerEngineConfig) {
         if let OrderedEvent::Entry(e) = event {
             cfg.counters.entries_seen.fetch_add(1, Ordering::Relaxed);
 
+            // Feed the nonce slot-hash cache on EVERY entry (not just on
+            // SlotComplete). Supervisor emits entries in PoH order so the
+            // final write for slot S is the correct last_entry_hash by the
+            // time we observe slot S+1. This eliminates the seal_lag race
+            // where MatchEvent arrives ~100ms after a sig lands but
+            // SlotComplete trails by ~4s (seal_lag * 400ms).
+            if let Some(cache) = &cfg.nonce_slot_hash_cache {
+                cache.record_entry(e.slot, e.observation.entry_hash);
+            }
+
             // Schedule check.
             let sched = cfg.schedule.load();
             let key = (e.slot, e.tick_idx_in_slot);

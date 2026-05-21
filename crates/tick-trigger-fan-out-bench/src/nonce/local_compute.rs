@@ -44,9 +44,14 @@ impl SlotHashCache {
         }
     }
 
-    pub fn record_slot_complete(&self, slot: u64, last_entry_hash: Hash) {
+    /// Record an entry's hash for `slot`. Idempotent — last-write-wins.
+    /// Called on EVERY supervisor Entry event (entries arrive in PoH order
+    /// thanks to the supervisor's reorder buffer, so the final write before
+    /// we transition to `slot+1` is the correct last_entry_hash). Also
+    /// safe to call from `SlotComplete` as a confirmation.
+    pub fn record_entry(&self, slot: u64, entry_hash: Hash) {
         let mut guard = self.inner.write();
-        guard.insert(slot, last_entry_hash);
+        guard.insert(slot, entry_hash);
         if let Some((&max_slot, _)) = guard.iter().next_back() {
             if max_slot > self.window {
                 let cutoff = max_slot - self.window;
@@ -59,6 +64,11 @@ impl SlotHashCache {
                 }
             }
         }
+    }
+
+    /// Back-compat alias for `record_entry`.
+    pub fn record_slot_complete(&self, slot: u64, last_entry_hash: Hash) {
+        self.record_entry(slot, last_entry_hash);
     }
 
     /// Returns the next durable-nonce value for a tx that LANDED in
