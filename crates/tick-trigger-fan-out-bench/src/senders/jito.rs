@@ -107,9 +107,17 @@ struct SendBundleRequest<'a> {
     jsonrpc: &'static str,
     id: u64,
     method: &'static str,
-    /// Jito spec: `params` is a tuple/array `[ [tx_b64, ...], options? ]`.
-    /// We send a single tx (bundle-of-one) so the inner array has length 1.
-    params: ([&'a str; 1],),
+    /// Jito spec: `params` is `[ [tx_b64, ...], { "encoding": "base64" } ]`.
+    /// Default encoding is base58 (deprecated, slow); we MUST declare base64
+    /// explicitly or Jito tries to base58-decode our base64 string and the
+    /// bundle is silently rejected (no clear error, just "Invalid Bundle:
+    /// Failed to deserialize transaction" or similar).
+    params: ([&'a str; 1], SendBundleOptions),
+}
+
+#[derive(Serialize)]
+struct SendBundleOptions {
+    encoding: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -149,7 +157,7 @@ impl TxSender for JitoSender {
             jsonrpc: "2.0",
             id: 1,
             method: "sendBundle",
-            params: ([b64.as_str()],),
+            params: ([b64.as_str()], SendBundleOptions { encoding: "base64" }),
         })
         .unwrap_or_default();
         let body: Arc<String> = Arc::new(body);
@@ -371,13 +379,14 @@ mod tests {
             jsonrpc: "2.0",
             id: 1,
             method: "sendBundle",
-            params: (["TXBASE64"],),
+            params: (["TXBASE64"], SendBundleOptions { encoding: "base64" }),
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["jsonrpc"], "2.0");
         assert_eq!(json["method"], "sendBundle");
-        // params shape: [ [tx_b64] ] — tuple of single inner array
+        // params shape: [ [tx_b64], {"encoding":"base64"} ]
         assert_eq!(json["params"][0][0], "TXBASE64");
+        assert_eq!(json["params"][1]["encoding"], "base64");
     }
 
     #[test]
