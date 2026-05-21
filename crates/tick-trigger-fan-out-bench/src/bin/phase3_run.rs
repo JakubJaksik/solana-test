@@ -59,7 +59,7 @@ use tick_trigger_fan_out_bench::recorder::{
     RegisterEvent, SendEvent,
 };
 use tick_trigger_fan_out_bench::schedule::{Schedule, ScheduleEntry};
-use tick_trigger_fan_out_bench::senders::{helius::HeliusSender, TxSender};
+use tick_trigger_fan_out_bench::senders::{helius::HeliusSender, jito::JitoSender, TxSender};
 use tick_trigger_fan_out_bench::trigger_engine::{
     spawn as spawn_engine, MatchEvent, TriggerEngineConfig, TriggerEngineCounters, TriggerEvent,
 };
@@ -287,9 +287,26 @@ fn main() -> anyhow::Result<()> {
             SenderKind::Helius => Arc::new(HeliusSender::new(
                 sc.id, sc.name.clone(), sc.endpoint_url.clone(),
             )),
+            SenderKind::Jito => {
+                if sc.regions.is_empty() {
+                    anyhow::bail!(
+                        "jito sender {:?} (id={}) must declare at least one region",
+                        sc.name, sc.id
+                    );
+                }
+                Arc::new(JitoSender::new(
+                    sc.id,
+                    sc.name.clone(),
+                    sc.endpoint_url.clone(),
+                    sc.regions.clone(),
+                    sc.outbound_ips.clone(),
+                ))
+            }
         };
         tracing::info!(id = sc.id, name = %s.name(), endpoint = %s.endpoint_url(),
-            tip_lamports = sc.tip_lamports, "sender configured");
+            tip_lamports = sc.tip_lamports,
+            regions = ?sc.regions, outbound_ips = sc.outbound_ips.len(),
+            "sender configured");
         senders_by_id.insert(sc.id, s);
     }
 

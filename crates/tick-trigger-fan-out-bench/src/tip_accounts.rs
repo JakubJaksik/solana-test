@@ -37,11 +37,36 @@ pub fn helius_tip_accounts() -> &'static [Pubkey] {
     })
 }
 
+/// Jito Block Engine tip accounts (mainnet). 8 accounts; rotation spreads
+/// write-lock contention so concurrent tips don't serialize on a single
+/// account. Source: `getTipAccounts` RPC response on Jito searcher API.
+const JITO_TIP_ACCOUNTS_STR: &[&str] = &[
+    "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+    "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+    "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+    "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
+    "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+    "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+    "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+    "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+];
+
+pub fn jito_tip_accounts() -> &'static [Pubkey] {
+    static CACHED: OnceLock<Vec<Pubkey>> = OnceLock::new();
+    CACHED.get_or_init(|| {
+        JITO_TIP_ACCOUNTS_STR
+            .iter()
+            .map(|s| Pubkey::from_str(s).expect("hardcoded jito tip account parses"))
+            .collect()
+    })
+}
+
 /// Return the tip account list for a given sender kind. Empty slice means
 /// no tip account (sender protocol does not use them).
 pub fn tip_accounts_for(kind: SenderKind) -> &'static [Pubkey] {
     match kind {
         SenderKind::Helius => helius_tip_accounts(),
+        SenderKind::Jito => jito_tip_accounts(),
     }
 }
 
@@ -112,5 +137,26 @@ mod tests {
     fn empty_rotator_returns_none() {
         let r = TipAccountRotator::new(vec![]);
         assert!(r.next().is_none());
+    }
+
+    #[test]
+    fn jito_list_loads_and_parses() {
+        let list = jito_tip_accounts();
+        assert_eq!(list.len(), 8);
+        let mut sorted = list.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 8, "jito tip accounts must be distinct");
+    }
+
+    #[test]
+    fn tip_accounts_for_jito_returns_jito_list() {
+        let helius = tip_accounts_for(SenderKind::Helius);
+        let jito = tip_accounts_for(SenderKind::Jito);
+        assert_eq!(jito, jito_tip_accounts());
+        // Helius and Jito sets must be disjoint.
+        for h in helius {
+            assert!(!jito.contains(h), "tip account {} present in both lists", h);
+        }
     }
 }

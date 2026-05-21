@@ -154,6 +154,7 @@ fn default_compute_unit_limit() -> u32 {
 #[serde(rename_all = "snake_case")]
 pub enum SenderKind {
     Helius,
+    Jito,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -161,11 +162,22 @@ pub struct SenderConfig {
     pub id: u8,
     pub name: String,
     pub kind: SenderKind,
+    /// For single-endpoint senders (Helius): full URL.
+    /// For multi-region senders (Jito): URL template with `{region}` placeholder,
+    /// e.g. `"https://{region}.mainnet.block-engine.jito.wtf"`.
     pub endpoint_url: String,
     #[serde(default)]
     pub tip_lamports: u64,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Multi-region fan-out targets (Jito-style senders). Empty for
+    /// single-endpoint senders.
+    #[serde(default)]
+    pub regions: Vec<String>,
+    /// Outbound IPs to rotate through when sending. Empty = OS-chosen default.
+    /// Used to spread rate-limit budget across multiple source IPs.
+    #[serde(default)]
+    pub outbound_ips: Vec<String>,
 }
 
 fn default_enabled() -> bool {
@@ -252,5 +264,30 @@ mod tests {
           "endpoint_url":"http://x", "tip_lamports":1000, "enabled":false }"#;
         let s: SenderConfig = serde_json::from_str(json).unwrap();
         assert!(!s.enabled);
+    }
+
+    #[test]
+    fn jito_sender_with_regions_and_ips_parses() {
+        let json = r#"{
+          "id": 2, "name": "jito-multi", "kind": "jito",
+          "endpoint_url": "https://{region}.mainnet.block-engine.jito.wtf",
+          "tip_lamports": 10000,
+          "regions": ["frankfurt", "amsterdam", "london", "ny"],
+          "outbound_ips": ["10.0.0.1", "10.0.0.2"]
+        }"#;
+        let s: SenderConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(s.kind, SenderKind::Jito);
+        assert_eq!(s.regions, vec!["frankfurt", "amsterdam", "london", "ny"]);
+        assert_eq!(s.outbound_ips, vec!["10.0.0.1", "10.0.0.2"]);
+        assert_eq!(s.tip_lamports, 10000);
+    }
+
+    #[test]
+    fn helius_sender_without_regions_still_parses() {
+        let json = r#"{ "id":0, "name":"helius", "kind":"helius",
+          "endpoint_url":"http://x", "tip_lamports":5000 }"#;
+        let s: SenderConfig = serde_json::from_str(json).unwrap();
+        assert!(s.regions.is_empty());
+        assert!(s.outbound_ips.is_empty());
     }
 }

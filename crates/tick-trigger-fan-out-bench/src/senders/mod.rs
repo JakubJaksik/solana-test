@@ -6,6 +6,7 @@
 //! all fit the same shape.
 
 pub mod helius;
+pub mod jito;
 
 use async_trait::async_trait;
 use solana_sdk::{signature::Signature, transaction::Transaction};

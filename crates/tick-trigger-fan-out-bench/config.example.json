@@ -34,6 +34,16 @@
       "endpoint_url": "http://fra-sender.helius-rpc.com/fast",
       "tip_lamports": 200000,
       "enabled": true
+    },
+    {
+      "id": 2,
+      "name": "jito-multi",
+      "kind": "jito",
+      "endpoint_url": "https://{region}.mainnet.block-engine.jito.wtf/api/v1/bundles",
+      "tip_lamports": 10000,
+      "regions": ["frankfurt", "amsterdam", "london", "ny"],
+      "outbound_ips": [],
+      "enabled": true
     }
   ],
   "run": {
