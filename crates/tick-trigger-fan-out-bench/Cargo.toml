@@ -26,6 +26,18 @@ ctrlc = "3"
 # 40-byte (slot u64, blake3 Hash) keys. Single-threaded merger means we
 # don't need DoS resistance.
 ahash = "0.8"
+async-trait = "0.1"
+dashmap = "6"
+arc-swap = "1"
+rand = "0.9"
+bs58 = "0.5"
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+solana-client = "3.1"
+solana-commitment-config = "3.1"
+solana-system-interface = "3.2"
+solana-compute-budget-interface = "3.0"
+base64 = "0.22"
+bincode = "1.3"
 
 [lib]
 name = "tick_trigger_fan_out_bench"
@@ -38,3 +50,7 @@ path = "src/bin/phase1_observe.rs"
 [[bin]]
 name = "phase2_observe"
 path = "src/bin/phase2_observe.rs"
+
+[[bin]]
+name = "phase3_run"
+path = "src/bin/phase3_run.rs"

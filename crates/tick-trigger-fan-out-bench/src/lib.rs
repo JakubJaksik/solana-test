@@ -39,6 +39,14 @@
 //! Modules below are deliberately small; new phases will add their own
 //! `phaseN_*` modules in parallel rather than extending existing ones.
 
+pub mod blockhash_cache;
+pub mod config;
 pub mod merger;
 pub mod ordering;
 pub mod poh_supervisor;
+pub mod recorder;
+pub mod schedule;
+pub mod senders;
+pub mod trigger_engine;
+pub mod tx_builder;
+pub mod wallet;

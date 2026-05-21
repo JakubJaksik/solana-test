@@ -1,0 +1,46 @@
+{
+  "rpc": {
+    "url": "https://api.mainnet.solana.com",
+    "blockhash_refresh_secs": 5
+  },
+  "wallet": {
+    "keypair_path": "~/solana-test/wallet.json"
+  },
+  "sources": {
+    "shredstream_grpc_url": "http://127.0.0.1:9999",
+    "yellowstone_grpc_url": "https://routh-burlinesses-gsikponzjp-dedicated-lb.helius-rpc.com:2053",
+    "yellowstone_auth_token": "2e0057e9-3b46-44c6-9d3c-c76bee532c24",
+    "channel_capacity": 65536
+  },
+  "supervisor": {
+    "entry_timeout_ms": 150,
+    "slot_seal_lag_slots": 10
+  },
+  "schedule": {
+    "seed": null,
+    "chunk_size_slots": 30,
+    "lead_slots": 100
+  },
+  "tx": {
+    "self_transfer_lamports": 1,
+    "priority_fee_microlamports": 5000,
+    "compute_unit_limit": 200000
+  },
+  "senders": [
+    {
+      "id": 0,
+      "name": "helius-dual",
+      "kind": "helius",
+      "endpoint_url": "http://fra-sender.helius-rpc.com/fast",
+      "tip_lamports": 200000,
+      "enabled": true
+    }
+  ],
+  "run": {
+    "output_dir": "runs",
+    "min_balance_lamports": 1500000,
+    "observation_deadline_secs": 90,
+    "duration": "5m",
+    "triggers_per_slot": 1
+  }
+}
