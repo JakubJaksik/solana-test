@@ -458,6 +458,8 @@ fn main() -> anyhow::Result<()> {
     println!("Blockhash not ready   : {}", pp.blockhash_not_ready);
     println!("Signing errors        : {}", pp.signing_errors);
     println!("Pool evictions        : {}", pp.pool_evictions);
+    println!("Nonce stalls (retries): {}", pp.nonce_stall);
+    println!("Entries past slot     : {}", pp.entries_past_slot);
     println!();
     println!("--- Dispatcher ---");
     let pool_hits = dispatcher_counters.pool_hits.load(Ordering::Relaxed);

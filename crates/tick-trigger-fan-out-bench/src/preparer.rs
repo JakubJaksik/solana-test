@@ -42,9 +42,14 @@ pub struct PreparerCounters {
     pub signing_errors: AtomicU64,
     pub blockhash_not_ready: AtomicU64,
     pub pool_evictions: AtomicU64,
-    /// Nonce-mode only: triggers dropped because no nonce was Ready
-    /// (manager all in-flight). Sign rate is bottlenecked by nonce cycle time.
+    /// Nonce-mode only: count of iterations where take_ready() returned None.
+    /// On stall we retry the same entry instead of dropping it, so this is
+    /// "retry attempts" rather than "entries lost".
     pub nonce_stall: AtomicU64,
+    /// Schedule entries we received from the channel but whose slot was
+    /// already in the past by the time we tried to sign — happens if we
+    /// stalled on nonces for so long that the engine moved beyond them.
+    pub entries_past_slot: AtomicU64,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -55,6 +60,7 @@ pub struct PreparerCountersSnapshot {
     pub blockhash_not_ready: u64,
     pub pool_evictions: u64,
     pub nonce_stall: u64,
+    pub entries_past_slot: u64,
 }
 
 impl PreparerCounters {
@@ -67,6 +73,7 @@ impl PreparerCounters {
             blockhash_not_ready: l(&self.blockhash_not_ready),
             pool_evictions: l(&self.pool_evictions),
             nonce_stall: l(&self.nonce_stall),
+            entries_past_slot: l(&self.entries_past_slot),
         }
     }
 }
@@ -125,18 +132,37 @@ fn run_loop(cfg: PreparerConfig) {
         return;
     }
     let mut last_evict = Instant::now();
+    // Entry currently being processed but waiting for a Ready nonce. When set,
+    // the next loop iteration retries this entry instead of pulling a new one
+    // from the channel. This prevents dropping schedule entries when all
+    // nonces are momentarily InFlight.
+    let mut pending: Option<ScheduleEntry> = None;
     loop {
         if cfg.stop.load(Ordering::Relaxed) {
             break;
         }
-        let entry = match cfg.schedule_rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(e) => e,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                maybe_evict(&cfg, &mut last_evict);
-                continue;
-            }
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        let entry = match pending.take() {
+            Some(e) => e,
+            None => match cfg.schedule_rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(e) => e,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    maybe_evict(&cfg, &mut last_evict);
+                    continue;
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            },
         };
+
+        // Drop entries whose slot is already in the past — no point signing for
+        // a slot the engine will never fire on. Without this, a long nonce
+        // stall would spin forever on one stale entry.
+        let current = cfg.current_slot.load(Ordering::Relaxed);
+        if current > 0 && entry.slot + 1 < current {
+            cfg.counters
+                .entries_past_slot
+                .fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
 
         let trigger_id = TriggerId::from_slot_tick(entry.slot, entry.tick);
         let prepared_at = Instant::now();
@@ -144,7 +170,7 @@ fn run_loop(cfg: PreparerConfig) {
 
         // Source the blockhash + optional nonce params for this trigger.
         // Nonce mode: take Ready nonce from manager. Fresh mode: use
-        // blockhash cache.
+        // blockhash cache. On stall, KEEP the entry — retry next iter.
         let (bh, nonce_params, nonce_id): (
             solana_sdk::hash::Hash,
             Option<tx_builder::NonceParams>,
@@ -161,6 +187,11 @@ fn run_loop(cfg: PreparerConfig) {
                 ),
                 None => {
                     cfg.counters.nonce_stall.fetch_add(1, Ordering::Relaxed);
+                    pending = Some(entry);
+                    // Brief sleep to avoid spinning. 1ms is short enough that
+                    // a returning nonce is grabbed promptly, long enough not
+                    // to peg a CPU.
+                    std::thread::sleep(Duration::from_millis(1));
                     continue;
                 }
             },
@@ -169,6 +200,8 @@ fn run_loop(cfg: PreparerConfig) {
                     cfg.counters
                         .blockhash_not_ready
                         .fetch_add(1, Ordering::Relaxed);
+                    pending = Some(entry);
+                    std::thread::sleep(Duration::from_millis(1));
                     continue;
                 }
                 (cfg.blockhash_cache.current(), None, None)
