@@ -37,6 +37,8 @@ pub struct JitoSender {
 }
 
 struct JitoRegion {
+    /// Region identifier (e.g. "frankfurt"). Kept for diagnostics/logging.
+    #[allow(dead_code)]
     name: String,
     url: String,
     /// Round-robin cursor into `clients_by_ip`. Separate per region so each
@@ -78,8 +80,7 @@ fn build_clients(outbound_ips: &[String]) -> Vec<reqwest::Client> {
             .timeout(Duration::from_secs(5))
             .tcp_nodelay(true)
             .pool_max_idle_per_host(8)
-            .http2_keep_alive_interval(Duration::from_secs(15))
-            .http2_keep_alive_timeout(Duration::from_secs(5))
+            .tcp_keepalive(Duration::from_secs(30))
     }
     if outbound_ips.is_empty() {
         return vec![base().build().expect("reqwest client")];
