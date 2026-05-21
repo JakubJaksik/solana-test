@@ -437,101 +437,129 @@ fn main() -> anyhow::Result<()> {
     let s = supervisor_counters.snapshot();
     let e = engine_counters.snapshot();
     let r = recorder_counters.snapshot();
-    println!("\n=== PHASE 3 FINAL REPORT ===");
-    println!("Run dir            : {}", run_dir.display());
-    println!();
-    println!("--- Sources ---");
-    println!("SS received        : {}", m.ss_received);
-    println!("YS received        : {}", m.ys_received);
-    println!();
-    println!("--- Supervisor ---");
-    println!("Entries immediate  : {}", s.entries_emitted_immediate);
-    println!("Entries reordered  : {}", s.entries_emitted_reordered);
-    println!("Missing markers    : {}", s.entries_missing_timeout);
-    println!("Slots complete     : {}", s.slots_complete);
-    println!("Slots incomplete   : {}", s.slots_incomplete);
-    println!();
-    println!("--- Preparer ---");
     let pp = preparer_counters.snapshot();
-    println!("Triggers prepared     : {}", pp.triggers_prepared);
-    println!("Variants signed       : {}", pp.variants_signed);
-    println!("Blockhash not ready   : {}", pp.blockhash_not_ready);
-    println!("Signing errors        : {}", pp.signing_errors);
-    println!("Pool evictions        : {}", pp.pool_evictions);
-    println!("Nonce stalls (retries): {}", pp.nonce_stall);
-    println!("Entries past slot     : {}", pp.entries_past_slot);
-    println!();
-    println!("--- Dispatcher ---");
     let pool_hits = dispatcher_counters.pool_hits.load(Ordering::Relaxed);
     let pool_misses_built =
         dispatcher_counters.pool_misses_fallback_built.load(Ordering::Relaxed);
     let pool_misses_skipped =
         dispatcher_counters.pool_misses_skipped_no_blockhash.load(Ordering::Relaxed);
-    let total = pool_hits + pool_misses_built + pool_misses_skipped;
-    println!("Pool hits             : {} ({:.1}%)", pool_hits,
-        if total > 0 { pool_hits as f64 / total as f64 * 100.0 } else { 0.0 });
-    println!("Pool miss → fallback  : {} ({:.1}%)", pool_misses_built,
-        if total > 0 { pool_misses_built as f64 / total as f64 * 100.0 } else { 0.0 });
-    println!("Pool miss → skipped   : {}", pool_misses_skipped);
+    let active = active_summary.lock().clone();
+
+    println!("\n=== PHASE 3 FINAL REPORT ===");
+    println!("Run dir            : {}", run_dir.display());
     println!();
-    println!("--- Trigger engine ---");
-    println!("Entries seen       : {}", e.entries_seen);
-    println!("Schedule hits      : {}", e.schedule_hits);
-    println!("Triggers fired     : {}", e.schedule_hits);
-    println!("Sig hits           : {}", e.sig_hits);
+
+    println!("--- Pipeline volumes ---");
+    println!("SS / YS entries     : {} / {}", m.ss_received, m.ys_received);
+    println!("Supervisor          : imm={} reord={} miss={}",
+        s.entries_emitted_immediate, s.entries_emitted_reordered, s.entries_missing_timeout);
+    println!("Slots               : complete={} incomplete={}",
+        s.slots_complete, s.slots_incomplete);
+    println!("Schedule entries    : {} prepared, {} fired",
+        pp.triggers_prepared, e.schedule_hits);
     println!();
-    println!("--- Recorder (per-trigger outcomes) ---");
-    println!("Landed             : {}", r.records_landed);
-    println!("Send errors        : {}", r.records_send_error);
-    println!("Unknown pending    : {}", r.records_unknown_pending);
-    println!("Register events    : {}", r.register_events);
-    println!("Send events        : {}", r.send_events);
-    println!("Match events       : {}", r.match_events);
+
+    // Triggers section — unique (slot, tick) events.
+    let triggers_fired = active.triggers_attempted;
+    let triggers_landed = active.triggers_landed;
+    let triggers_lost = triggers_fired.saturating_sub(triggers_landed);
+    let land_pct = if triggers_fired > 0 {
+        triggers_landed as f64 / triggers_fired as f64 * 100.0
+    } else { 0.0 };
+    let lost_pct = if triggers_fired > 0 {
+        triggers_lost as f64 / triggers_fired as f64 * 100.0
+    } else { 0.0 };
+    println!("--- Triggers (unique slot+tick) ---");
+    println!("Fired               : {}", triggers_fired);
+    println!("Landed              : {} ({:.1}%)", triggers_landed, land_pct);
+    println!("Lost (no variant)   : {} ({:.1}%)", triggers_lost, lost_pct);
+    println!();
+
+    // Sends section — one row per (trigger, sender) network attempt.
+    // In nonce mode at most 1 variant per trigger can land; the sibling
+    // necessarily ends up as unknown_pending. We split that out from
+    // genuinely lost triggers (both variants failed to land).
+    let sends_total = active.attempts_total;
+    let sends_landed = active.attempts_landed;
+    let sends_send_err = active.attempts_send_error;
+    let sends_unknown = active.attempts_unknown_pending;
+    let losing_siblings = if cfg.nonce.enabled {
+        triggers_landed // 1 sibling per landed trigger, all variants except the winner
+    } else {
+        0
+    };
+    let lost_no_land = sends_unknown.saturating_sub(losing_siblings);
+    println!("--- Sends (per trigger × per sender) ---");
+    println!("Total sent          : {}", sends_total);
+    println!("  landed            : {}", sends_landed);
     if cfg.nonce.enabled {
-        println!("Nonce advances (local) : {}", r.nonce_advanced_local);
-        println!("Nonce local miss (→RPC): {}", r.nonce_local_compute_miss);
+        println!("  losing siblings   : {}  (other variant of landed trigger; expected in nonce mode)",
+            losing_siblings);
+        println!("  lost (no land)    : {}  (both variants of lost triggers)", lost_no_land);
+    } else {
+        println!("  unknown pending   : {}", sends_unknown);
+    }
+    println!("  send errors       : {}", sends_send_err);
+    println!();
+
+    // Per-sender wins — in nonce mode the meaningful metric is which sender
+    // got the landing when both raced. `lost_to_other` = times the other sender
+    // won this trigger; their sum (per row) = total triggers landed.
+    println!("--- Per-sender wins (at most 1 variant per trigger lands in nonce mode) ---");
+    println!(
+        "{:<3} {:<14} {:>6} {:>15} {:>12} {:>13} {:>14}",
+        "id", "name", "wins", "loses_to_other", "wins_share", "rtt_avg(us)", "obs_avg(us)"
+    );
+    let sender_name_by_id: std::collections::HashMap<u8, String> = cfg
+        .senders
+        .iter()
+        .map(|sc| (sc.id, sc.name.clone()))
+        .collect();
+    for ps in &active.per_sender {
+        let lost_to_other = triggers_landed.saturating_sub(ps.landed);
+        let wins_share = if triggers_landed > 0 {
+            ps.landed as f64 / triggers_landed as f64 * 100.0
+        } else { 0.0 };
+        let name = sender_name_by_id
+            .get(&ps.sender_id)
+            .cloned()
+            .unwrap_or_default();
+        println!(
+            "{:<3} {:<14} {:>6} {:>15} {:>11.1}% {:>13} {:>14}",
+            ps.sender_id,
+            name,
+            ps.landed,
+            lost_to_other,
+            wins_share,
+            ps.send_rtt_us_avg().map(|v| format!("{:.0}", v)).unwrap_or_else(|| "-".into()),
+            ps.send_to_observed_us_avg().map(|v| format!("{:.0}", v)).unwrap_or_else(|| "-".into()),
+        );
     }
     println!();
 
-    // --- Active-window summary: cuts startup/shutdown noise out of the % ---
-    let active = active_summary.lock().clone();
-    println!("--- Active window (between first send and last send) ---");
-    println!("Active duration       : {:.2}s", active.active_secs);
-    println!("Unique triggers fired : {}", active.triggers_attempted);
-    println!(
-        "Triggers LANDED       : {} ({:.1}% per-trigger)",
-        active.triggers_landed,
-        active.trigger_land_rate().map(|r| r * 100.0).unwrap_or(0.0)
-    );
-    println!("Attempts total        : {}", active.attempts_total);
-    println!(
-        "  landed              : {} ({:.1}% per-attempt)",
-        active.attempts_landed,
-        if active.attempts_total > 0 {
-            active.attempts_landed as f64 / active.attempts_total as f64 * 100.0
-        } else {
-            0.0
-        }
-    );
-    println!("  send error          : {}", active.attempts_send_error);
-    println!("  unknown pending     : {}", active.attempts_unknown_pending);
+    println!("--- Active window ---");
+    println!("Duration            : {:.2}s", active.active_secs);
     println!();
-    println!("--- Per-sender breakdown ---");
-    println!(
-        "{:<6} {:>8} {:>8} {:>9} {:>9} {:>13} {:>14}",
-        "sndr", "attempt", "landed", "send_err", "unknown", "rtt_avg(us)", "obs_avg(us)"
-    );
-    for s in &active.per_sender {
-        println!(
-            "{:<6} {:>8} {:>8} {:>9} {:>9} {:>13} {:>14}",
-            s.sender_id,
-            s.attempts,
-            s.landed,
-            s.send_error,
-            s.unknown_pending,
-            s.send_rtt_us_avg().map(|v| format!("{:.0}", v)).unwrap_or_else(|| "-".into()),
-            s.send_to_observed_us_avg().map(|v| format!("{:.0}", v)).unwrap_or_else(|| "-".into()),
-        );
+
+    println!("--- Diagnostics ---");
+    println!("Preparer            : variants_signed={} signing_err={} bh_not_ready={} pool_evict={} past_slot={}",
+        pp.variants_signed, pp.signing_errors, pp.blockhash_not_ready,
+        pp.pool_evictions, pp.entries_past_slot);
+    if cfg.nonce.enabled {
+        println!("Preparer nonce      : stalls={} (retries waiting for Ready)", pp.nonce_stall);
+    }
+    let dispatcher_total = pool_hits + pool_misses_built + pool_misses_skipped;
+    println!("Dispatcher          : hits={} ({:.1}%) miss_fallback={} miss_skipped={}",
+        pool_hits,
+        if dispatcher_total > 0 { pool_hits as f64 / dispatcher_total as f64 * 100.0 } else { 0.0 },
+        pool_misses_built, pool_misses_skipped);
+    println!("Trigger engine      : entries={} sched_hits={} sig_hits={}",
+        e.entries_seen, e.schedule_hits, e.sig_hits);
+    println!("Recorder            : register={} send={} match={} write_err={}",
+        r.register_events, r.send_events, r.match_events, r.write_errors);
+    if cfg.nonce.enabled {
+        println!("Recorder nonce      : advanced_local={} local_compute_miss={}",
+            r.nonce_advanced_local, r.nonce_local_compute_miss);
     }
     println!();
     println!("Records written to : {}", recorder_path.display());
@@ -720,13 +748,19 @@ fn log_summary(
     let s = supervisor.snapshot();
     let e = engine.snapshot();
     let r = recorder.snapshot();
+    // In nonce mode r.records_landed ≈ unique triggers landed (at most 1 variant
+    // per trigger lands), so we approximate triggers_lost as a running diff.
+    // Slightly noisy near tail because lost-trigger detection lags by the
+    // observation deadline, but good enough for live monitoring.
+    let fired = e.schedule_hits;
+    let landed = r.records_landed;
+    let lost_so_far = fired.saturating_sub(landed).saturating_sub(r.records_unknown_pending / 2);
     tracing::info!(
-        "t={:.1}s | src ss={} ys={} | sup imm={} reord={} miss={} cplt={} incp={} | engine entries={} hits={} sig={} | rec land={} send_err={} unk={}",
+        "t={:.1}s | src ss={} ys={} | slots cplt={} incp={} | triggers fired={} landed={} lost~{} | sends land={} err={} pend={}",
         elapsed_secs, m.ss_received, m.ys_received,
-        s.entries_emitted_immediate, s.entries_emitted_reordered, s.entries_missing_timeout,
         s.slots_complete, s.slots_incomplete,
-        e.entries_seen, e.schedule_hits, e.sig_hits,
-        r.records_landed, r.records_send_error, r.records_unknown_pending,
+        fired, landed, lost_so_far,
+        landed, r.records_send_error, r.records_unknown_pending,
     );
 }
 
