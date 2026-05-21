@@ -57,7 +57,20 @@ pub struct BuildParams<'a> {
     pub trigger_id: u64,
     pub tip_account: Option<Pubkey>,
     pub tip_lamports: u64,
+    /// Durable nonce mode. When `Some((nonce_pubkey, _))`, the tx is signed
+    /// with `recent_blockhash = blockhash` (the nonce account's current
+    /// stored hash) AND prepends an `AdvanceNonceAccount` instruction
+    /// referencing `nonce_pubkey`. The nonce account is advanced on chain
+    /// to `sha256("DURABLE_NONCE" || recent_blockhash)`.
+    /// When `None`, the standard fresh-blockhash mode is used.
+    pub nonce: Option<NonceParams>,
     pub tx_cfg: &'a TxConfig,
+}
+
+#[derive(Clone, Copy)]
+pub struct NonceParams {
+    pub nonce_pubkey: Pubkey,
+    pub authority: Pubkey,
 }
 
 pub struct BuiltTx {
@@ -68,7 +81,16 @@ pub struct BuiltTx {
 pub fn build(params: BuildParams<'_>) -> BuiltTx {
     let payer_pk = params.payer.pubkey();
 
-    let mut ixs: Vec<Instruction> = Vec::with_capacity(5);
+    let mut ixs: Vec<Instruction> = Vec::with_capacity(6);
+    // Durable nonce mode: `AdvanceNonceAccount` MUST be the first instruction
+    // for the bank to recognise the tx as a nonced tx and use
+    // `nonce_account.durable_nonce` as the validation blockhash.
+    if let Some(np) = params.nonce {
+        ixs.push(solana_system_interface::instruction::advance_nonce_account(
+            &np.nonce_pubkey,
+            &np.authority,
+        ));
+    }
     ixs.push(ComputeBudgetInstruction::set_compute_unit_limit(
         params.tx_cfg.compute_unit_limit,
     ));
@@ -162,6 +184,7 @@ mod tests {
             trigger_id: 12345,
             tip_account: Some(tip),
             tip_lamports: 1000,
+            nonce: None,
             tx_cfg: &cfg,
         });
         // 5 ixs: SetCULimit, SetCUPrice, Memo, Tip transfer, Self transfer.
@@ -181,6 +204,7 @@ mod tests {
             trigger_id: 12345,
             tip_account: None,
             tip_lamports: 0,
+            nonce: None,
             tx_cfg: &cfg,
         });
         // 4 ixs (no tip): SetCULimit, SetCUPrice, Memo, Self transfer.
@@ -199,6 +223,7 @@ mod tests {
             trigger_id: 12345,
             tip_account: None,
             tip_lamports: 0,
+            nonce: None,
             tx_cfg: &cfg,
         });
         // 3 ixs (no priority fee, no tip): SetCULimit, Memo, Self transfer.
@@ -215,11 +240,11 @@ mod tests {
         let bh = Hash::new_unique();
         let a = build(BuildParams {
             payer: &payer, blockhash: bh, sender_id: 0, trigger_id: 1,
-            tip_account: None, tip_lamports: 0, tx_cfg: &cfg,
+            tip_account: None, tip_lamports: 0, nonce: None, tx_cfg: &cfg,
         });
         let b = build(BuildParams {
             payer: &payer, blockhash: bh, sender_id: 0, trigger_id: 2,
-            tip_account: None, tip_lamports: 0, tx_cfg: &cfg,
+            tip_account: None, tip_lamports: 0, nonce: None, tx_cfg: &cfg,
         });
         assert_ne!(a.signature, b.signature);
     }

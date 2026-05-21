@@ -17,6 +17,7 @@
 //! DashSet for pending sigs). Atomic counters with `Ordering::Relaxed`.
 //! Zero allocations on the fast path beyond the event channel try_send.
 
+use crate::nonce::local_compute::SlotHashCache as NonceSlotHashCache;
 use crate::poh_supervisor::OrderedEvent;
 use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender};
@@ -128,6 +129,10 @@ pub struct TriggerEngineConfig {
     pub counters: Arc<TriggerEngineCounters>,
     pub stop: Arc<AtomicBool>,
     pub pinned_core: Option<usize>,
+    /// Optional nonce slot-hash cache. When `Some`, engine pushes
+    /// `SlotComplete.last_entry_hash` into this cache so the recorder can
+    /// later compute the next durable nonce without an RPC round-trip.
+    pub nonce_slot_hash_cache: Option<Arc<NonceSlotHashCache>>,
 }
 
 pub fn spawn(cfg: TriggerEngineConfig) -> std::io::Result<JoinHandle<()>> {
@@ -160,8 +165,24 @@ fn run_loop(cfg: TriggerEngineConfig) {
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         };
-        // Missing / SlotComplete / SlotIncomplete carry no per-entry
-        // signatures, so nothing for the engine to do; ignored.
+        // Slot lifecycle events feed the nonce slot_hash_cache (when nonce
+        // mode is enabled). Other variants are no-ops for the engine.
+        match &event {
+            OrderedEvent::SlotComplete(c) => {
+                if let Some(cache) = &cfg.nonce_slot_hash_cache {
+                    cache.record_slot_complete(c.slot, c.last_entry_hash);
+                }
+            }
+            OrderedEvent::SlotIncomplete(i) => {
+                // Best-effort: still push the highest-seen hash. Recorder
+                // can fall back to RPC if local-compute produces a wrong
+                // nonce (tx will silently fail on chain → matcher times out).
+                if let Some(cache) = &cfg.nonce_slot_hash_cache {
+                    cache.record_slot_complete(i.slot, i.last_entry_hash);
+                }
+            }
+            _ => {}
+        }
         if let OrderedEvent::Entry(e) = event {
             cfg.counters.entries_seen.fetch_add(1, Ordering::Relaxed);
 
@@ -282,6 +303,7 @@ mod tests {
             counters: counters.clone(),
             stop: stop.clone(),
             pinned_core: None,
+            nonce_slot_hash_cache: None,
         })
         .unwrap();
         in_tx.send(entry_event(100, 5, 5, vec![])).unwrap();
@@ -324,6 +346,7 @@ mod tests {
             counters: counters.clone(),
             stop: stop.clone(),
             pinned_core: None,
+            nonce_slot_hash_cache: None,
         })
         .unwrap();
         in_tx.send(entry_event(100, 0, 0, vec![sig])).unwrap();
@@ -356,6 +379,7 @@ mod tests {
             counters: counters.clone(),
             stop: stop.clone(),
             pinned_core: None,
+            nonce_slot_hash_cache: None,
         })
         .unwrap();
         // Tick 6 — not scheduled.

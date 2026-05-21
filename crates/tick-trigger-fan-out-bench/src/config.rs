@@ -19,6 +19,42 @@ pub struct Config {
     pub tx: TxConfig,
     pub senders: Vec<SenderConfig>,
     pub run: RunConfig,
+    #[serde(default)]
+    pub nonce: NonceConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct NonceConfig {
+    /// When true, preparer signs tx with `AdvanceNonceAccount` + nonce
+    /// blockhash from the manager instead of fresh blockhash from RPC.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Path to `nonce-config.json` produced by `setup_nonces` (the bin from
+    /// `fan-out-bench`). Contains the nonce account pubkeys.
+    #[serde(default = "default_nonce_config_path")]
+    pub config_path: PathBuf,
+    /// RPC fallback poll interval for Stale nonces. 15s by default.
+    #[serde(default = "default_nonce_rpc_poll_secs")]
+    pub rpc_poll_interval_secs: u64,
+    /// Move a nonce to Stale if it stays in InFlight longer than this.
+    #[serde(default = "default_in_flight_deadline_secs")]
+    pub in_flight_deadline_secs: u64,
+    /// Move a nonce to Stale if it stays in AwaitingUpdate longer than this.
+    #[serde(default = "default_awaiting_update_deadline_secs")]
+    pub awaiting_update_deadline_secs: u64,
+}
+
+fn default_nonce_config_path() -> PathBuf {
+    PathBuf::from("nonce-config.json")
+}
+fn default_nonce_rpc_poll_secs() -> u64 {
+    15
+}
+fn default_in_flight_deadline_secs() -> u64 {
+    45
+}
+fn default_awaiting_update_deadline_secs() -> u64 {
+    15
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

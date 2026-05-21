@@ -16,6 +16,7 @@
 
 use crate::blockhash_cache::BlockhashCache;
 use crate::config::{SenderConfig, TxConfig};
+use crate::nonce::manager::{NonceId, NonceManager};
 use crate::schedule::ScheduleEntry;
 use crate::tip_accounts::{tip_accounts_for, TipAccountRotator};
 use crate::trigger_engine::TriggerId;
@@ -26,6 +27,7 @@ use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use solana_sdk::signature::Keypair;
+use solana_sdk::signer::Signer;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -40,6 +42,9 @@ pub struct PreparerCounters {
     pub signing_errors: AtomicU64,
     pub blockhash_not_ready: AtomicU64,
     pub pool_evictions: AtomicU64,
+    /// Nonce-mode only: triggers dropped because no nonce was Ready
+    /// (manager all in-flight). Sign rate is bottlenecked by nonce cycle time.
+    pub nonce_stall: AtomicU64,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -49,6 +54,7 @@ pub struct PreparerCountersSnapshot {
     pub signing_errors: u64,
     pub blockhash_not_ready: u64,
     pub pool_evictions: u64,
+    pub nonce_stall: u64,
 }
 
 impl PreparerCounters {
@@ -60,6 +66,7 @@ impl PreparerCounters {
             signing_errors: l(&self.signing_errors),
             blockhash_not_ready: l(&self.blockhash_not_ready),
             pool_evictions: l(&self.pool_evictions),
+            nonce_stall: l(&self.nonce_stall),
         }
     }
 }
@@ -79,6 +86,11 @@ pub struct PreparerConfig {
     pub shuffle_seed: u64,
     /// Highest slot the observer has seen — drives pool eviction.
     pub current_slot: Arc<AtomicU64>,
+    /// When `Some`, durable-nonce mode is on: preparer takes a Ready nonce
+    /// from the manager per trigger and signs with
+    /// `recent_blockhash = nonce.blockhash` plus an `AdvanceNonceAccount`
+    /// instruction. When `None`, fresh-blockhash mode (legacy).
+    pub nonce_manager: Option<Arc<NonceManager>>,
     pub counters: Arc<PreparerCounters>,
     pub stop: Arc<AtomicBool>,
 }
@@ -126,16 +138,42 @@ fn run_loop(cfg: PreparerConfig) {
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         };
 
-        if cfg.blockhash_cache.is_empty() {
-            cfg.counters
-                .blockhash_not_ready
-                .fetch_add(1, Ordering::Relaxed);
-            continue;
-        }
-
-        let bh = cfg.blockhash_cache.current();
         let trigger_id = TriggerId::from_slot_tick(entry.slot, entry.tick);
         let prepared_at = Instant::now();
+        let authority_pk = cfg.keypair.pubkey();
+
+        // Source the blockhash + optional nonce params for this trigger.
+        // Nonce mode: take Ready nonce from manager. Fresh mode: use
+        // blockhash cache.
+        let (bh, nonce_params, nonce_id): (
+            solana_sdk::hash::Hash,
+            Option<tx_builder::NonceParams>,
+            Option<NonceId>,
+        ) = match &cfg.nonce_manager {
+            Some(mgr) => match mgr.take_ready() {
+                Some((id, nonce_pubkey, nonce_blockhash)) => (
+                    nonce_blockhash,
+                    Some(tx_builder::NonceParams {
+                        nonce_pubkey,
+                        authority: authority_pk,
+                    }),
+                    Some(id),
+                ),
+                None => {
+                    cfg.counters.nonce_stall.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+            },
+            None => {
+                if cfg.blockhash_cache.is_empty() {
+                    cfg.counters
+                        .blockhash_not_ready
+                        .fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                (cfg.blockhash_cache.current(), None, None)
+            }
+        };
 
         let mut variants: Vec<PreSignedTx> = Vec::with_capacity(senders.len());
         for slot in &senders {
@@ -151,6 +189,7 @@ fn run_loop(cfg: PreparerConfig) {
                 trigger_id: trigger_id.0,
                 tip_account,
                 tip_lamports: slot.config.tip_lamports,
+                nonce: nonce_params,
                 tx_cfg: &cfg.tx_cfg,
             });
             variants.push(PreSignedTx {
@@ -159,6 +198,7 @@ fn run_loop(cfg: PreparerConfig) {
                 signature: built.signature,
                 blockhash: bh,
                 prepared_at,
+                nonce_id,
             });
             cfg.counters.variants_signed.fetch_add(1, Ordering::Relaxed);
         }

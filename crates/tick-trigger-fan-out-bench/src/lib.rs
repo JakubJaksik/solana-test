@@ -42,6 +42,7 @@
 pub mod blockhash_cache;
 pub mod config;
 pub mod merger;
+pub mod nonce;
 pub mod ordering;
 pub mod poh_supervisor;
 pub mod preparer;

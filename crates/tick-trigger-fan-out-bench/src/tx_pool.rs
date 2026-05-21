@@ -19,6 +19,10 @@ pub struct PreSignedTx {
     pub signature: Signature,
     pub blockhash: Hash,
     pub prepared_at: Instant,
+    /// `Some(id)` when this tx uses a durable nonce account from the
+    /// `NonceManager`; the dispatcher/recorder uses this to signal the
+    /// manager on observed landing. `None` for fresh-blockhash mode.
+    pub nonce_id: Option<crate::nonce::manager::NonceId>,
 }
 
 pub struct TxPool {
@@ -77,6 +81,7 @@ mod tests {
             signature: Signature::default(),
             blockhash: Hash::default(),
             prepared_at: Instant::now(),
+            nonce_id: None,
         }
     }
 

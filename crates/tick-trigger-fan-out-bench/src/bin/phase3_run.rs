@@ -42,6 +42,12 @@ use tick_trigger_fan_out_bench::config::{Config, SenderKind};
 use tick_trigger_fan_out_bench::merger::{
     spawn as spawn_merger, MergedEntry, MergerConfig, MergerCounters,
 };
+use tick_trigger_fan_out_bench::nonce::{
+    bootstrap as nonce_bootstrap,
+    local_compute::SlotHashCache as NonceSlotHashCache,
+    manager::NonceManager,
+    rpc_fallback as nonce_rpc_fallback,
+};
 use tick_trigger_fan_out_bench::poh_supervisor::{
     spawn as spawn_supervisor, OrderedEvent, PohSupervisorConfig, PohSupervisorCounters,
 };
@@ -49,7 +55,8 @@ use tick_trigger_fan_out_bench::preparer::{
     spawn as spawn_preparer, PreparerConfig, PreparerCounters,
 };
 use tick_trigger_fan_out_bench::recorder::{
-    spawn as spawn_recorder, RecorderConfig, RecorderCounters, RegisterEvent, SendEvent,
+    spawn as spawn_recorder, ActiveWindowSummary, RecorderConfig, RecorderCounters,
+    RegisterEvent, SendEvent,
 };
 use tick_trigger_fan_out_bench::schedule::{Schedule, ScheduleEntry};
 use tick_trigger_fan_out_bench::senders::{helius::HeliusSender, TxSender};
@@ -198,21 +205,6 @@ fn main() -> anyhow::Result<()> {
             }
         })?;
 
-    // Trigger engine.
-    let (trigger_tx, trigger_rx) = bounded::<TriggerEvent>(8192);
-    let (match_tx, match_rx) = bounded::<MatchEvent>(8192);
-    let engine_counters = Arc::new(TriggerEngineCounters::default());
-    let _engine = spawn_engine(TriggerEngineConfig {
-        ordered_rx,
-        schedule: schedule_snapshot.clone(),
-        pending_sigs: pending_sigs.clone(),
-        trigger_tx,
-        match_tx,
-        counters: engine_counters.clone(),
-        stop: stop.clone(),
-        pinned_core: None,
-    })?;
-
     // Blockhash cache.
     let bh_runner = blockhash_cache::spawn(
         rpc.clone(),
@@ -228,6 +220,57 @@ fn main() -> anyhow::Result<()> {
     // signing cost — just a DashMap lookup).
     let tx_pool = Arc::new(TxPool::new());
     let preparer_counters = Arc::new(PreparerCounters::default());
+
+    // Durable nonce setup (when enabled in config). MUST be initialised
+    // BEFORE the trigger engine since the engine takes a clone of the
+    // slot-hash cache to feed it from SlotComplete events.
+    let (nonce_manager, nonce_slot_hash_cache): (
+        Option<Arc<NonceManager>>,
+        Option<Arc<NonceSlotHashCache>>,
+    ) = if cfg.nonce.enabled {
+        let nonces = nonce_bootstrap::bootstrap(
+            &rpc,
+            &cfg.nonce.config_path,
+            &keypair.pubkey(),
+        )
+        .context("bootstrap nonce manager from nonce-config.json")?;
+        if nonces.is_empty() {
+            anyhow::bail!("nonce.enabled=true but nonce config has 0 accounts");
+        }
+        tracing::info!(count = nonces.len(), "durable nonce manager initialized");
+        let mgr = Arc::new(NonceManager::new(nonces));
+        let cache = Arc::new(NonceSlotHashCache::new(256));
+        // RPC fallback poller for Stale recovery.
+        let _rpc_poller = nonce_rpc_fallback::spawn(nonce_rpc_fallback::RpcPollerConfig {
+            rpc: rpc.clone(),
+            manager: mgr.clone(),
+            poll_interval: Duration::from_secs(cfg.nonce.rpc_poll_interval_secs),
+            in_flight_deadline: Duration::from_secs(cfg.nonce.in_flight_deadline_secs),
+            awaiting_update_deadline: Duration::from_secs(
+                cfg.nonce.awaiting_update_deadline_secs,
+            ),
+            stop: stop.clone(),
+        })?;
+        (Some(mgr), Some(cache))
+    } else {
+        (None, None)
+    };
+
+    // Trigger engine (now that nonce slot-hash cache is set up).
+    let (trigger_tx, trigger_rx) = bounded::<TriggerEvent>(8192);
+    let (match_tx, match_rx) = bounded::<MatchEvent>(8192);
+    let engine_counters = Arc::new(TriggerEngineCounters::default());
+    let _engine = spawn_engine(TriggerEngineConfig {
+        ordered_rx,
+        schedule: schedule_snapshot.clone(),
+        pending_sigs: pending_sigs.clone(),
+        trigger_tx,
+        match_tx,
+        counters: engine_counters.clone(),
+        stop: stop.clone(),
+        pinned_core: None,
+        nonce_slot_hash_cache: nonce_slot_hash_cache.clone(),
+    })?;
 
     // Senders: build Arc<dyn TxSender> per enabled SenderConfig.
     // For phase 3+ supports multiple — dispatcher fans out to all variants
@@ -261,6 +304,7 @@ fn main() -> anyhow::Result<()> {
         senders: enabled_senders.clone(),
         shuffle_seed: cfg.schedule.seed.unwrap_or(0xDEADBEEF),
         current_slot: current_slot.clone(),
+        nonce_manager: nonce_manager.clone(),
         counters: preparer_counters.clone(),
         stop: stop.clone(),
     })?;
@@ -270,6 +314,8 @@ fn main() -> anyhow::Result<()> {
     let (send_event_tx, send_event_rx) = bounded::<SendEvent>(8192);
     let recorder_counters = Arc::new(RecorderCounters::default());
     let anchor = Instant::now();
+    let active_summary: Arc<parking_lot::Mutex<ActiveWindowSummary>> =
+        Arc::new(parking_lot::Mutex::new(ActiveWindowSummary::default()));
     let _recorder = spawn_recorder(RecorderConfig {
         register_rx,
         send_rx: send_event_rx,
@@ -280,6 +326,9 @@ fn main() -> anyhow::Result<()> {
         deadline: Duration::from_secs(cfg.run.observation_deadline_secs),
         counters: recorder_counters.clone(),
         stop: stop.clone(),
+        nonce_manager: nonce_manager.clone(),
+        slot_hash_cache: nonce_slot_hash_cache.clone(),
+        summary: active_summary.clone(),
     })?;
 
     // Dispatcher: drains trigger_rx, takes pre-signed Vec<PreSignedTx> from
@@ -298,6 +347,7 @@ fn main() -> anyhow::Result<()> {
     let dispatcher_tx_cfg = cfg.tx.clone();
     let dispatcher_counters = Arc::new(DispatcherCounters::default());
     let dispatcher_counters_clone = dispatcher_counters.clone();
+    let dispatcher_nonce_mode = cfg.nonce.enabled;
     std::thread::Builder::new()
         .name("dispatcher".into())
         .spawn(move || {
@@ -315,6 +365,7 @@ fn main() -> anyhow::Result<()> {
                 dispatcher_keypair,
                 dispatcher_bh,
                 dispatcher_tx_cfg,
+                dispatcher_nonce_mode,
                 dispatcher_register_tx,
                 dispatcher_send_tx,
                 dispatcher_counters_clone,
@@ -434,6 +485,52 @@ fn main() -> anyhow::Result<()> {
     println!("Register events    : {}", r.register_events);
     println!("Send events        : {}", r.send_events);
     println!("Match events       : {}", r.match_events);
+    if cfg.nonce.enabled {
+        println!("Nonce advances (local) : {}", r.nonce_advanced_local);
+        println!("Nonce local miss (→RPC): {}", r.nonce_local_compute_miss);
+    }
+    println!();
+
+    // --- Active-window summary: cuts startup/shutdown noise out of the % ---
+    let active = active_summary.lock().clone();
+    println!("--- Active window (between first send and last send) ---");
+    println!("Active duration       : {:.2}s", active.active_secs);
+    println!("Unique triggers fired : {}", active.triggers_attempted);
+    println!(
+        "Triggers LANDED       : {} ({:.1}% per-trigger)",
+        active.triggers_landed,
+        active.trigger_land_rate().map(|r| r * 100.0).unwrap_or(0.0)
+    );
+    println!("Attempts total        : {}", active.attempts_total);
+    println!(
+        "  landed              : {} ({:.1}% per-attempt)",
+        active.attempts_landed,
+        if active.attempts_total > 0 {
+            active.attempts_landed as f64 / active.attempts_total as f64 * 100.0
+        } else {
+            0.0
+        }
+    );
+    println!("  send error          : {}", active.attempts_send_error);
+    println!("  unknown pending     : {}", active.attempts_unknown_pending);
+    println!();
+    println!("--- Per-sender breakdown ---");
+    println!(
+        "{:<6} {:>8} {:>8} {:>9} {:>9} {:>13} {:>14}",
+        "sndr", "attempt", "landed", "send_err", "unknown", "rtt_avg(us)", "obs_avg(us)"
+    );
+    for s in &active.per_sender {
+        println!(
+            "{:<6} {:>8} {:>8} {:>9} {:>9} {:>13} {:>14}",
+            s.sender_id,
+            s.attempts,
+            s.landed,
+            s.send_error,
+            s.unknown_pending,
+            s.send_rtt_us_avg().map(|v| format!("{:.0}", v)).unwrap_or_else(|| "-".into()),
+            s.send_to_observed_us_avg().map(|v| format!("{:.0}", v)).unwrap_or_else(|| "-".into()),
+        );
+    }
     println!();
     println!("Records written to : {}", recorder_path.display());
 
@@ -457,6 +554,7 @@ async fn dispatcher_loop(
     keypair: Arc<solana_sdk::signature::Keypair>,
     bh_cache: Arc<tick_trigger_fan_out_bench::blockhash_cache::BlockhashCache>,
     tx_cfg: tick_trigger_fan_out_bench::config::TxConfig,
+    nonce_mode_enabled: bool,
     register_tx: Sender<RegisterEvent>,
     send_event_tx: Sender<SendEvent>,
     counters: Arc<DispatcherCounters>,
@@ -496,6 +594,20 @@ async fn dispatcher_loop(
                 v
             }
             None => {
+                // In nonce mode we deliberately DON'T build a fallback — we'd
+                // need to coordinate with the manager (take_ready, advance on
+                // landing) which the preparer already owns. Better to skip
+                // this trigger than emit a tx with a stale nonce.
+                if nonce_mode_enabled {
+                    counters
+                        .pool_misses_skipped_no_blockhash
+                        .fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        slot = trig.slot, tick = trig.tick,
+                        "pool miss in nonce mode — skipping (preparer didn't supply variants in time)"
+                    );
+                    continue;
+                }
                 if bh_cache.is_empty() {
                     counters
                         .pool_misses_skipped_no_blockhash
@@ -527,6 +639,7 @@ async fn dispatcher_loop(
                         trigger_id: trig.trigger_id.0,
                         tip_account: tip,
                         tip_lamports: sc.tip_lamports,
+                        nonce: None,
                         tx_cfg: &tx_cfg,
                     });
                     v.push(PreSignedTx {
@@ -535,6 +648,7 @@ async fn dispatcher_loop(
                         signature: built.signature,
                         blockhash: bh,
                         prepared_at: Instant::now(),
+                        nonce_id: None,
                     });
                 }
                 v
@@ -568,6 +682,7 @@ async fn dispatcher_loop(
                 trigger_observed_at: trig.trigger_observed_at,
                 prepared_at: presigned.prepared_at,
                 blockhash: presigned.blockhash,
+                nonce_id: presigned.nonce_id,
             };
             let _ = register_tx.try_send(reg);
 
