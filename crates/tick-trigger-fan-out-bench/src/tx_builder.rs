@@ -10,9 +10,10 @@
 //! Designed to be cheap to build — the only allocation on the hot path
 //! is the `Transaction` itself. No RPC calls, no I/O.
 //!
-//! Memo encoding: a single printable ASCII byte derived from `sender_id`
-//! (`b'!' + sender_id`, range 33..=126). Lets us identify which sender's
-//! variant landed by reading the memo data of the on-chain entry.
+//! Memo encoding: ASCII hex string `"{sender_id:02x}:{trigger_id:016x}"`
+//! (19 bytes, valid UTF-8). The SPL Memo program rejects non-UTF-8 input
+//! with `Invalid Instruction Data`, which fails the whole tx atomically
+//! (nonce does NOT advance, tip is NOT paid, only base fee is charged).
 
 use crate::config::TxConfig;
 use solana_compute_budget_interface::ComputeBudgetInstruction;
@@ -38,13 +39,11 @@ fn memo_program_id() -> Pubkey {
     })
 }
 
-/// Encode a sender id as a printable ASCII byte for the memo program.
-/// Range: 33..=126 (94 values), so sender ids must be in 0..94.
-pub fn memo_byte_for_sender(sender_id: u8) -> u8 {
-    // saturating: clamp into the printable range so we never produce
-    // an unprintable / control character.
-    let offset = (sender_id as u32).min(93) as u8;
-    b'!' + offset
+/// Build the memo payload as a 19-byte ASCII hex string:
+/// `"{sender_id:02x}:{trigger_id:016x}"`. Valid UTF-8, unique per
+/// (sender_id, trigger_id), and human-readable on explorers.
+pub fn memo_payload(sender_id: u8, trigger_id: u64) -> String {
+    format!("{:02x}:{:016x}", sender_id, trigger_id)
 }
 
 pub struct BuildParams<'a> {
@@ -99,14 +98,10 @@ pub fn build(params: BuildParams<'_>) -> BuiltTx {
             params.tx_cfg.priority_fee_microlamports,
         ));
     }
-    // Memo: 1 byte sender_id + 8 bytes trigger_id (LE u64).
-    // Per-trigger uniqueness is critical when sharing a recent blockhash
-    // across multiple triggers — otherwise identical instruction content
-    // produces identical signed txs that on-chain dedupes as "already
-    // processed", causing silent second-trigger drops.
-    let mut memo_data = Vec::with_capacity(9);
-    memo_data.push(memo_byte_for_sender(params.sender_id));
-    memo_data.extend_from_slice(&params.trigger_id.to_le_bytes());
+    // Memo: ASCII hex "ss:tttttttttttttttt" — UTF-8 required by SPL Memo.
+    // Per-trigger uniqueness via trigger_id prevents on-chain "already
+    // processed" silent drops when triggers share a blockhash window.
+    let memo_data = memo_payload(params.sender_id, params.trigger_id).into_bytes();
     ixs.push(Instruction {
         program_id: memo_program_id(),
         accounts: vec![AccountMeta::new_readonly(payer_pk, true)],
@@ -149,26 +144,28 @@ mod tests {
     }
 
     #[test]
-    fn memo_byte_in_printable_range() {
-        for id in 0u8..=255u8 {
-            let b = memo_byte_for_sender(id);
-            assert!(
-                (33..=126).contains(&b),
-                "sender_id {} memo byte {} out of printable ASCII",
-                id, b
-            );
+    fn memo_payload_is_valid_utf8_and_19_bytes() {
+        for sender in [0u8, 1, 7, 42, 255] {
+            for trigger in [0u64, 1, 0xDEAD_BEEF, u64::MAX] {
+                let s = memo_payload(sender, trigger);
+                assert_eq!(s.len(), 19);
+                assert!(s.is_ascii());
+                // round-trip parse to confirm format
+                let (l, r) = s.split_once(':').unwrap();
+                assert_eq!(u8::from_str_radix(l, 16).unwrap(), sender);
+                assert_eq!(u64::from_str_radix(r, 16).unwrap(), trigger);
+            }
         }
     }
 
     #[test]
-    fn distinct_sender_ids_get_distinct_bytes_until_clamp() {
-        // 0..=93 should map to distinct bytes (94 values).
+    fn distinct_inputs_produce_distinct_memo_payloads() {
         let mut seen = std::collections::HashSet::new();
-        for id in 0u8..=93u8 {
-            assert!(seen.insert(memo_byte_for_sender(id)));
+        for sender in 0u8..16 {
+            for trigger in 0u64..16 {
+                assert!(seen.insert(memo_payload(sender, trigger)));
+            }
         }
-        // 94 and above clamp to the same final byte.
-        assert_eq!(memo_byte_for_sender(94), memo_byte_for_sender(255));
     }
 
     #[test]
