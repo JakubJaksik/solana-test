@@ -586,7 +586,7 @@ fn emit_record(
     let ns_since = |t: Instant| t.saturating_duration_since(cfg.anchor).as_nanos() as u64;
     let trigger_observed_at_ns = ns_since(reg.trigger_observed_at);
     let prepared_at_ns = ns_since(reg.prepared_at);
-    let (send_at_ns, send_ack_at_ns, http_status, rpc_err_code, rpc_err_message, send_error, endpoint_url_used) =
+    let (send_at_ns, send_ack_at_ns, http_status, rpc_err_code, rpc_err_message, send_error, endpoint_url_used, provider_request_id) =
         match &att.send {
             Some(s) => (
                 ns_since(s.outcome.send_at),
@@ -596,8 +596,9 @@ fn emit_record(
                 s.outcome.rpc_err_message.clone(),
                 s.outcome.error.clone(),
                 s.outcome.endpoint_url_used.clone(),
+                s.outcome.provider_request_id.clone(),
             ),
-            None => (0, None, None, None, None, None, None),
+            None => (0, None, None, None, None, None, None, None),
         };
     let observed_at_ns = att.matched.as_ref().map(|m| ns_since(m.observed_at));
     let observed_slot = att.matched.as_ref().map(|m| m.observed_slot);
@@ -667,6 +668,7 @@ fn emit_record(
         rpc_err_message,
         send_error,
         endpoint_url_used,
+        provider_request_id,
         final_outcome: outcome,
     };
     if let Ok(line) = serde_json::to_string(&record) {
