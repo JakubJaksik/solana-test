@@ -15,15 +15,13 @@ use clap::Parser;
 use serde_json::{json, Value};
 use solana_client::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
-use solana_sdk::signature::{Keypair, Signer};
+use solana_sdk::signer::Signer;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tick_trigger_fan_out_bench::config::{Config, SenderKind};
 use tick_trigger_fan_out_bench::nonce::bootstrap::bootstrap as bootstrap_nonces;
 use tick_trigger_fan_out_bench::tip_accounts::{tip_accounts_for, TipAccountRotator};
-use tick_trigger_fan_out_bench::tx_builder::{
-    self, BuildParams, NonceParams, BASE_TX_FEE_LAMPORTS, RENT_EXEMPT_MIN_LAMPORTS,
-};
+use tick_trigger_fan_out_bench::tx_builder::{self, BuildParams, NonceParams};
 use tick_trigger_fan_out_bench::wallet;
 
 #[derive(Parser, Debug)]
@@ -113,51 +111,35 @@ fn main() -> Result<()> {
         (stored_hash, Some(np))
     };
 
-    // ── 5. Throwaway tipper + tip account ──
-    let tipper = Keypair::new();
+    // ── 5. Tip account (random from Jito's 8 tip accounts) ──
     let rotator = TipAccountRotator::new(tip_accounts_for(SenderKind::Jito).to_vec());
     let tip_account = rotator
         .next()
         .ok_or_else(|| anyhow::anyhow!("no jito tip accounts"))?;
-    let fund_amount = tip_lamports + RENT_EXEMPT_MIN_LAMPORTS + BASE_TX_FEE_LAMPORTS;
-    println!("tipper: {} (throwaway)", tipper.pubkey());
     println!("tip account: {}", tip_account);
-    println!(
-        "fund_amount: {} (= tip {} + rent_exempt {} + base_fee {})",
-        fund_amount, tip_lamports, RENT_EXEMPT_MIN_LAMPORTS, BASE_TX_FEE_LAMPORTS
-    );
 
-    // ── 6. Build Tx1 + Tx2 ──
+    // ── 6. Build single tx (mode 1: tip from main wallet, durable nonce) ──
     let tx1 = tx_builder::build(BuildParams {
         payer: &keypair,
         blockhash: tx1_bh,
         sender_id: jito.id,
         trigger_id: 0xDEADBEEF,
-        tip_account: None,
-        tip_lamports: 0,
+        tip_account: Some(tip_account),
+        tip_lamports,
         nonce: nonce_params,
         tx_cfg: &cfg.tx,
-        fund_tipper: Some((tipper.pubkey(), fund_amount)),
+        fund_tipper: None,
     });
-    let tx2 = tx_builder::build_tipper_tx(
-        &tipper,
-        fresh_bh,
-        tip_account,
-        tip_lamports,
-        keypair.pubkey(),
-        RENT_EXEMPT_MIN_LAMPORTS,
-    );
 
     println!("\nTx1 ixs count: {}", tx1.tx.message.instructions.len());
     println!("Tx1 signature: {}", tx1.signature);
-    println!("Tx2 ixs count: {}", tx2.tx.message.instructions.len());
-    println!("Tx2 signature: {}", tx2.signature);
 
     // ── 7. Serialize → base64 ──
     let tx1_b64 = base64::engine::general_purpose::STANDARD
         .encode(&bincode::serialize(&tx1.tx).unwrap());
-    let tx2_b64 = base64::engine::general_purpose::STANDARD
-        .encode(&bincode::serialize(&tx2.tx).unwrap());
+    // Used to be a 2-tx bundle; now mode 1 = single tx. Keep variable for
+    // backward compat with the per-tx fallback below (only sends Tx1).
+    let _ = &fresh_bh;
 
     // ── 8. Submit simulateBundle to Jito-fork RPC ──
     let rpc_url = args.rpc_url.unwrap_or_else(|| cfg.rpc.url.clone());
@@ -168,7 +150,7 @@ fn main() -> Result<()> {
         "id": 1,
         "method": "simulateBundle",
         "params": [{
-            "encodedTransactions": [tx1_b64, tx2_b64]
+            "encodedTransactions": [tx1_b64]
         }]
     });
     let client = reqwest::blocking::Client::builder()
@@ -188,11 +170,8 @@ fn main() -> Result<()> {
     // Useful when simulateBundle is unavailable: simulates Tx1 alone.
     // Tx2 alone WILL FAIL pre-sim (tipper has 0 balance) — that's a known
     // limitation of stand-alone tx simulation vs bundle simulation.
-    println!("\n--- Fallback: simulateTransaction for Tx1 and Tx2 separately ---");
-    println!("(NOTE: Tx2 in real bundle runs AFTER Tx1 funds tipper, so standalone simulation");
-    println!(" with sigVerify=true and replaceRecentBlockhash=true tells us only about");
-    println!(" *structural* validity, not bundle execution semantics.)");
-    for (name, b64) in [("Tx1", &tx1_b64), ("Tx2", &tx2_b64)] {
+    println!("\n--- Fallback: simulateTransaction for Tx1 ---");
+    for (name, b64) in [("Tx1", &tx1_b64)] {
         // (1) strict mode: keep blockhash, sigVerify on — same conditions as
         // leader pre-validation outside of bundle context.
         let p_strict = json!({
