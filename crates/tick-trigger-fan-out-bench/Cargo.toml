@@ -66,3 +66,7 @@ path = "src/bin/phase2_observe.rs"
 [[bin]]
 name = "phase3_run"
 path = "src/bin/phase3_run.rs"
+
+[[bin]]
+name = "simulate_jito_bundle"
+path = "src/bin/simulate_jito_bundle.rs"
