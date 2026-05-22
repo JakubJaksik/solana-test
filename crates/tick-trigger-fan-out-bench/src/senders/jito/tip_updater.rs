@@ -60,7 +60,12 @@ impl JitoTipUpdater {
             loop {
                 if stop.load(Ordering::Relaxed) { break; }
                 match fetch_and_compute(&client, percentile, floor, ceiling).await {
-                    Ok(v) => current.store(v, Ordering::Relaxed),
+                    Ok(v) => {
+                        let prev = current.swap(v, Ordering::Relaxed);
+                        if prev != v {
+                            tracing::info!(prev_lamports = prev, new_lamports = v, percentile, "jito tip floor updated");
+                        }
+                    }
                     Err(e) => tracing::warn!(error = %e, "jito tip floor fetch failed; retaining previous value"),
                 }
                 tokio::time::sleep(interval).await;

@@ -103,6 +103,9 @@ pub struct TriggerRecord {
     pub rpc_err_message: Option<String>,
     pub send_error: Option<String>,
     pub endpoint_url_used: Option<String>,
+    /// Provider-side request id (Jito bundle UUID, Helius signature, etc).
+    /// Useful for follow-up status queries against the provider.
+    pub provider_request_id: Option<String>,
 
     pub final_outcome: FinalOutcome,
 }
