@@ -300,6 +300,7 @@ fn main() -> anyhow::Result<()> {
                     sc.endpoint_url.clone(),
                     sc.regions.clone(),
                     sc.outbound_ips.clone(),
+                    sc.min_send_interval_ms,
                 ))
             }
         };

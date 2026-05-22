@@ -178,6 +178,17 @@ pub struct SenderConfig {
     /// Used to spread rate-limit budget across multiple source IPs.
     #[serde(default)]
     pub outbound_ips: Vec<String>,
+    /// Minimum interval between successive sends to this sender, in
+    /// milliseconds. When > 0, the sender locally throttles itself: if a
+    /// trigger fires while last send was within `min_send_interval_ms`,
+    /// the call short-circuits with `error="throttled_local"` instead of
+    /// hitting the network. 0 (default) = no throttling.
+    ///
+    /// Diagnostic tool: helps verify whether vendor rate-limit errors are
+    /// volume-driven (drop sends with throttling, errors should go away)
+    /// vs. caused by something else (errors persist even at low rate).
+    #[serde(default)]
+    pub min_send_interval_ms: u64,
 }
 
 fn default_enabled() -> bool {

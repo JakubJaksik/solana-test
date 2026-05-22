@@ -34,6 +34,13 @@ pub struct JitoSender {
     /// OS-chosen source IP. Cloning a `Client` is cheap (Arc internal).
     clients_by_ip: Vec<reqwest::Client>,
     regions: Vec<JitoRegion>,
+    /// When > 0, throttles successive sends to at most one per this interval.
+    /// 0 (default) = no throttling.
+    min_send_interval: Duration,
+    /// Wall-clock of last accepted (non-throttled) send. `None` until first
+    /// send. Protected by Mutex; contention is negligible since only one
+    /// send() call updates it at a time per trigger.
+    last_send_at: parking_lot::Mutex<Option<Instant>>,
 }
 
 struct JitoRegion {
@@ -53,6 +60,7 @@ impl JitoSender {
         endpoint_template: impl Into<String>,
         regions: Vec<String>,
         outbound_ips: Vec<String>,
+        min_send_interval_ms: u64,
     ) -> Self {
         let endpoint_template = endpoint_template.into();
         let clients_by_ip = build_clients(&outbound_ips);
@@ -70,6 +78,8 @@ impl JitoSender {
             endpoint_template,
             clients_by_ip,
             regions,
+            min_send_interval: Duration::from_millis(min_send_interval_ms),
+            last_send_at: parking_lot::Mutex::new(None),
         }
     }
 }
@@ -149,6 +159,32 @@ impl TxSender for JitoSender {
 
     async fn send(&self, tx: &Transaction) -> SendOutcome {
         let signature = tx.signatures.first().copied().unwrap_or_default();
+
+        // Local self-throttling gate. When `min_send_interval > 0`, drop any
+        // send that arrives within the interval since the last accepted one.
+        // Skipped sends short-circuit BEFORE network and BEFORE serialization;
+        // recorder will see this as a fast send_error with `throttled_local`.
+        if self.min_send_interval > Duration::ZERO {
+            let now = Instant::now();
+            let mut last = self.last_send_at.lock();
+            if let Some(prev) = *last {
+                if now.duration_since(prev) < self.min_send_interval {
+                    return SendOutcome {
+                        send_at: now,
+                        send_ack_at: Some(now),
+                        signature,
+                        http_status: None,
+                        rpc_err_code: None,
+                        rpc_err_message: None,
+                        provider_request_id: None,
+                        error: Some("throttled_local".into()),
+                        endpoint_url_used: None,
+                    };
+                }
+            }
+            *last = Some(now);
+        }
+
         let serialized = bincode::serialize(tx).unwrap_or_default();
         use base64::Engine as _;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&serialized);
