@@ -38,12 +38,11 @@ struct Args {
     /// isolate whether the 2-tx structure works at all
     #[arg(long, default_value_t = false)]
     no_nonce: bool,
-    /// Jito Block Engine simulate endpoint
-    #[arg(
-        long,
-        default_value = "https://mainnet.block-engine.jito.wtf/api/v1/bundles"
-    )]
-    jito_url: String,
+    /// RPC URL override (must be a Jito-fork RPC that supports
+    /// `simulateBundle`, e.g. dedicated Helius / Jito mainnet RPC). If not
+    /// set, uses `cfg.rpc.url` from the config file.
+    #[arg(long)]
+    rpc_url: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -140,8 +139,10 @@ fn main() -> Result<()> {
     let tx2_b64 = base64::engine::general_purpose::STANDARD
         .encode(&bincode::serialize(&tx2.tx).unwrap());
 
-    // ── 8. Submit simulateBundle ──
-    println!("\nSubmitting simulateBundle to: {}", args.jito_url);
+    // ── 8. Submit simulateBundle to Jito-fork RPC ──
+    let rpc_url = args.rpc_url.unwrap_or_else(|| cfg.rpc.url.clone());
+    println!("\nSubmitting simulateBundle to: {}", rpc_url);
+    println!("(must be a Jito-fork RPC — Helius dedicated, Jito-Solana RPC, etc.)");
     let payload = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -151,37 +152,36 @@ fn main() -> Result<()> {
         }]
     });
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(15))
         .build()?;
     let resp = client
-        .post(&args.jito_url)
+        .post(&rpc_url)
         .header("Content-Type", "application/json")
         .body(payload.to_string())
         .send()?;
     let status = resp.status();
     let body: Value = resp.json().unwrap_or_else(|_| json!({"raw":"<not json>"}));
-    println!("\n=== Jito simulateBundle response (HTTP {}) ===", status);
+    println!("\n=== simulateBundle response (HTTP {}) ===", status);
     println!("{}", serde_json::to_string_pretty(&body)?);
 
-    // ── 9. Also try Solana RPC simulateBundle (Helius/Jito-fork) ──
-    println!("\n--- Also trying Solana RPC simulateBundle ({}) ---", cfg.rpc.url);
-    let solana_payload = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "simulateBundle",
-        "params": [{
-            "encodedTransactions": [tx1_b64, tx2_b64]
-        }]
-    });
-    let resp2 = client
-        .post(&cfg.rpc.url)
-        .header("Content-Type", "application/json")
-        .body(solana_payload.to_string())
-        .send()?;
-    let status2 = resp2.status();
-    let body2: Value = resp2.json().unwrap_or_else(|_| json!({"raw":"<not json>"}));
-    println!("HTTP {}", status2);
-    println!("{}", serde_json::to_string_pretty(&body2)?);
+    // ── 9. Fallback: per-tx simulateTransaction on the same RPC ──
+    // Useful when simulateBundle is unavailable: simulates Tx1 alone.
+    // Tx2 alone WILL FAIL pre-sim (tipper has 0 balance) — that's a known
+    // limitation of stand-alone tx simulation vs bundle simulation.
+    println!("\n--- Fallback: simulateTransaction for Tx1 (and Tx2 separately) ---");
+    for (name, b64) in [("Tx1", &tx1_b64), ("Tx2", &tx2_b64)] {
+        let p = json!({
+            "jsonrpc":"2.0","id":1,"method":"simulateTransaction",
+            "params":[b64, {"encoding":"base64","sigVerify":true,"replaceRecentBlockhash":false}]
+        });
+        let r = client.post(&rpc_url)
+            .header("Content-Type","application/json")
+            .body(p.to_string()).send()?;
+        let s = r.status();
+        let b: Value = r.json().unwrap_or_else(|_| json!({"raw":"<not json>"}));
+        println!("\n[{}] simulateTransaction HTTP {}", name, s);
+        println!("{}", serde_json::to_string_pretty(&b)?);
+    }
 
     Ok(())
 }
