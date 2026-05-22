@@ -64,7 +64,16 @@ fn main() -> Result<()> {
     println!("tip lamports: {}", tip_lamports);
 
     // ── 3. RPC + blockhash ──
-    let rpc = RpcClient::new_with_commitment(cfg.rpc.url.clone(), CommitmentConfig::processed());
+    // IMPORTANT: blockhash MUST come from a node whose view of chain is in
+    // sync with the validators Jito routes bundles to. Public RPC
+    // (api.mainnet.solana.com) lags vs Jito leaders → blockhash returns
+    // BlockhashNotFound during validation → bundle Invalid.
+    let bh_url = args
+        .rpc_url
+        .clone()
+        .unwrap_or_else(|| cfg.rpc.url.clone());
+    println!("blockhash source: {}", bh_url);
+    let rpc = RpcClient::new_with_commitment(bh_url, CommitmentConfig::processed());
     let fresh_bh = rpc.get_latest_blockhash().context("get_latest_blockhash")?;
     println!("fresh blockhash: {}", fresh_bh);
 
