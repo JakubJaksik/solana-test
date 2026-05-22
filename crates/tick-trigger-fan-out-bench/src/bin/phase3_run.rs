@@ -290,6 +290,19 @@ fn main() -> anyhow::Result<()> {
         std::collections::HashMap::new();
     let mut jito_counters_by_id: std::collections::HashMap<u8, JitoBundleCounters> =
         std::collections::HashMap::new();
+
+    // Long-lived runtime for background async tasks (tip updater, gRPC channel
+    // construction). Must outlive all senders. Leaked intentionally so its
+    // shutdown doesn't race with sender drops on process exit.
+    let bg_rt = TokioRtBuilder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .thread_name("jito-bg")
+        .build()
+        .expect("tokio bg runtime");
+    let bg_handle = bg_rt.handle().clone();
+    // Keep runtime alive for the process lifetime.
+    let _bg_rt_guard: &'static tokio::runtime::Runtime = Box::leak(Box::new(bg_rt));
     for sc in &enabled_senders {
         let s: Arc<dyn TxSender> = match sc.kind {
             SenderKind::Helius => Arc::new(HeliusSender::new(
@@ -309,11 +322,14 @@ fn main() -> anyhow::Result<()> {
                     sc.tip_refresh_interval_ms,
                 );
                 let tip_handle = updater.current_lamports.clone();
-                let _tip_task = updater.spawn(stop.clone());
+                let _tip_task = updater.spawn(&bg_handle, stop.clone());
                 jito_tip_handles.insert(sc.id, tip_handle.clone());
                 let jito_counters = JitoBundleCounters::default();
                 jito_counters_by_id.insert(sc.id, jito_counters.clone());
-                let bundle_sender = JitoBundleSender::new(
+                // gRPC Endpoint::connect_lazy needs a tokio context, even for
+                // lazy connect. Build the sender on the bg runtime.
+                let bundle_sender = bg_handle.block_on(async {
+                    JitoBundleSender::new(
                     sc.id,
                     sc.name.clone(),
                     sc.endpoint_url.clone(),
@@ -323,7 +339,8 @@ fn main() -> anyhow::Result<()> {
                     tip_handle,
                     sc.min_send_interval_ms,
                     jito_counters,
-                )?;
+                )
+                })?;
                 Arc::new(bundle_sender) as Arc<dyn TxSender>
             }
         };

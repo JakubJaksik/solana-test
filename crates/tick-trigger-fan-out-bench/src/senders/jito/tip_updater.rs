@@ -40,15 +40,19 @@ impl JitoTipUpdater {
         }
     }
 
-    /// Spawn the background poller. Returns immediately. Loop exits when
-    /// `stop` flips to true.
-    pub fn spawn(self, stop: Arc<std::sync::atomic::AtomicBool>) -> tokio::task::JoinHandle<()> {
+    /// Spawn the background poller on the given Tokio runtime handle.
+    /// Returns immediately. Loop exits when `stop` flips to true.
+    pub fn spawn(
+        self,
+        handle: &tokio::runtime::Handle,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+    ) -> tokio::task::JoinHandle<()> {
         let current = self.current_lamports.clone();
         let percentile = self.percentile;
         let floor = self.floor_lamports;
         let ceiling = self.ceiling_lamports;
         let interval = self.refresh_interval;
-        tokio::spawn(async move {
+        handle.spawn(async move {
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
