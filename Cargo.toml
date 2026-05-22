@@ -62,7 +62,7 @@ humantime = "2"
 hostname = "0.4"
 socket2 = "0.5"
 futures-util = "0.3"
-tonic = "0.12"
+tonic = "0.13"
 prost = "0.13"
 
 [profile.release]

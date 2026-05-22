@@ -28,6 +28,15 @@ use solana_system_interface::instruction as system_instruction;
 
 const MEMO_PROGRAM_ID_STR: &str = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 
+/// Rent-exempt minimum for a System-owned account holding 0 bytes of data.
+/// Stable on mainnet as of 2026-05; if Solana changes the rent schedule
+/// this must be updated. Used by the Jito bundle preparer for throwaway
+/// tipper accounts.
+pub const RENT_EXEMPT_MIN_LAMPORTS: u64 = 890_880;
+
+/// Standard signature fee. One signature → one `BASE_TX_FEE_LAMPORTS`.
+pub const BASE_TX_FEE_LAMPORTS: u64 = 5_000;
+
 /// Solana SPL Memo v2 program id, parsed once.
 fn memo_program_id() -> Pubkey {
     use std::sync::OnceLock;
@@ -64,6 +73,10 @@ pub struct BuildParams<'a> {
     /// When `None`, the standard fresh-blockhash mode is used.
     pub nonce: Option<NonceParams>,
     pub tx_cfg: &'a TxConfig,
+    /// When `Some((target, lamports))`, append an extra
+    /// `system_instruction::transfer(payer → target, lamports)` to the tx.
+    /// Used by the Jito bundle preparer to fund a throwaway tipper keypair.
+    pub fund_tipper: Option<(Pubkey, u64)>,
 }
 
 #[derive(Clone, Copy)]
@@ -124,9 +137,45 @@ pub fn build(params: BuildParams<'_>) -> BuiltTx {
         params.tx_cfg.self_transfer_lamports,
     ));
 
+    // Optional: fund a throwaway tipper account in the same tx (Jito bundle).
+    if let Some((tipper, amount)) = params.fund_tipper {
+        ixs.push(system_instruction::transfer(
+            &payer_pk,
+            &tipper,
+            amount,
+        ));
+    }
+
     let message = Message::new(&ixs, Some(&payer_pk));
     let mut tx = Transaction::new_unsigned(message);
     tx.sign(&[params.payer], params.blockhash);
+    let signature = tx.signatures[0];
+    BuiltTx { tx, signature }
+}
+
+/// Build Tx2 of a Jito bundle. Signed by a throwaway `tipper` keypair:
+/// 1) transfers `tip_lamports` to `tip_account`,
+/// 2) transfers `rent_exempt_lamports` back to `main_wallet` (send-back).
+///
+/// Caller funds the tipper with at least `tip_lamports + rent_exempt + base_fee`
+/// in Tx1 via `BuildParams.fund_tipper`. After Tx2 executes, the tipper holds
+/// 0 lamports and gets GC'd by the Solana epoch cleanup.
+pub fn build_tipper_tx(
+    tipper: &Keypair,
+    blockhash: Hash,
+    tip_account: Pubkey,
+    tip_lamports: u64,
+    main_wallet: Pubkey,
+    rent_exempt_lamports: u64,
+) -> BuiltTx {
+    let tipper_pk = tipper.pubkey();
+    let ixs = vec![
+        system_instruction::transfer(&tipper_pk, &tip_account, tip_lamports),
+        system_instruction::transfer(&tipper_pk, &main_wallet, rent_exempt_lamports),
+    ];
+    let message = Message::new(&ixs, Some(&tipper_pk));
+    let mut tx = Transaction::new_unsigned(message);
+    tx.sign(&[tipper], blockhash);
     let signature = tx.signatures[0];
     BuiltTx { tx, signature }
 }
@@ -183,6 +232,7 @@ mod tests {
             tip_lamports: 1000,
             nonce: None,
             tx_cfg: &cfg,
+            fund_tipper: None,
         });
         // 5 ixs: SetCULimit, SetCUPrice, Memo, Tip transfer, Self transfer.
         assert_eq!(built.tx.message.instructions.len(), 5);
@@ -203,6 +253,7 @@ mod tests {
             tip_lamports: 0,
             nonce: None,
             tx_cfg: &cfg,
+            fund_tipper: None,
         });
         // 4 ixs (no tip): SetCULimit, SetCUPrice, Memo, Self transfer.
         assert_eq!(built.tx.message.instructions.len(), 4);
@@ -222,6 +273,7 @@ mod tests {
             tip_lamports: 0,
             nonce: None,
             tx_cfg: &cfg,
+            fund_tipper: None,
         });
         // 3 ixs (no priority fee, no tip): SetCULimit, Memo, Self transfer.
         assert_eq!(built.tx.message.instructions.len(), 3);
@@ -237,12 +289,50 @@ mod tests {
         let bh = Hash::new_unique();
         let a = build(BuildParams {
             payer: &payer, blockhash: bh, sender_id: 0, trigger_id: 1,
-            tip_account: None, tip_lamports: 0, nonce: None, tx_cfg: &cfg,
+            tip_account: None, tip_lamports: 0, nonce: None, tx_cfg: &cfg, fund_tipper: None,
         });
         let b = build(BuildParams {
             payer: &payer, blockhash: bh, sender_id: 0, trigger_id: 2,
-            tip_account: None, tip_lamports: 0, nonce: None, tx_cfg: &cfg,
+            tip_account: None, tip_lamports: 0, nonce: None, tx_cfg: &cfg, fund_tipper: None,
         });
         assert_ne!(a.signature, b.signature);
+    }
+
+    #[test]
+    fn build_includes_fund_tipper_transfer_when_set() {
+        let payer = Keypair::new();
+        let tipper_pk = Pubkey::new_unique();
+        let cfg = cfg();
+        let built = build(BuildParams {
+            payer: &payer,
+            blockhash: Hash::new_unique(),
+            sender_id: 0,
+            trigger_id: 123,
+            tip_account: None,
+            tip_lamports: 0,
+            nonce: None,
+            tx_cfg: &cfg,
+            fund_tipper: Some((tipper_pk, 1_000_000)),
+        });
+        // 4 base ixs (SetCULimit, SetCUPrice, Memo, Self transfer) + 1 fund_tipper.
+        assert_eq!(built.tx.message.instructions.len(), 5);
+        let keys: Vec<_> = built.tx.message.account_keys.iter().collect();
+        assert!(
+            keys.iter().any(|k| **k == tipper_pk),
+            "tipper pubkey not found in account keys"
+        );
+    }
+
+    #[test]
+    fn build_tipper_tx_has_two_transfer_ixs_and_is_signed_by_tipper() {
+        let tipper = Keypair::new();
+        let main = Pubkey::new_unique();
+        let tip_acc = Pubkey::new_unique();
+        let bh = Hash::new_unique();
+        let built = build_tipper_tx(&tipper, bh, tip_acc, 50_000, main, RENT_EXEMPT_MIN_LAMPORTS);
+        assert_eq!(built.tx.message.instructions.len(), 2);
+        assert_eq!(built.tx.signatures.len(), 1);
+        assert_ne!(built.signature, Signature::default());
+        assert_eq!(built.tx.message.account_keys[0], tipper.pubkey());
     }
 }

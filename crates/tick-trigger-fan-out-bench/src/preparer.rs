@@ -100,6 +100,10 @@ pub struct PreparerConfig {
     pub nonce_manager: Option<Arc<NonceManager>>,
     pub counters: Arc<PreparerCounters>,
     pub stop: Arc<AtomicBool>,
+    /// Per-sender_id handle to the live tip floor value (lamports). Only
+    /// Jito senders populate this map; preparer reads from it at pre-sign
+    /// time so each bundle locks in a snapshot value.
+    pub jito_tip_handles: std::collections::HashMap<u8, Arc<AtomicU64>>,
 }
 
 struct SenderSlot {
@@ -210,30 +214,88 @@ fn run_loop(cfg: PreparerConfig) {
 
         let mut variants: Vec<PreSignedTx> = Vec::with_capacity(senders.len());
         for slot in &senders {
-            let tip_account = if slot.config.tip_lamports > 0 {
+            let is_jito = slot.config.kind == crate::config::SenderKind::Jito;
+            let tip_account = if slot.config.tip_lamports > 0 || is_jito {
                 slot.tip_rotator.next()
             } else {
                 None
             };
-            let built = tx_builder::build(tx_builder::BuildParams {
-                payer: &cfg.keypair,
-                blockhash: bh,
-                sender_id: slot.config.id,
-                trigger_id: trigger_id.0,
-                tip_account,
-                tip_lamports: slot.config.tip_lamports,
-                nonce: nonce_params,
-                tx_cfg: &cfg.tx_cfg,
-            });
-            variants.push(PreSignedTx {
-                sender_id: slot.config.id,
-                tx: Arc::new(built.tx),
-                signature: built.signature,
-                blockhash: bh,
-                prepared_at,
-                nonce_id,
-            });
-            cfg.counters.variants_signed.fetch_add(1, Ordering::Relaxed);
+
+            if is_jito {
+                let Some(tip_handle) = cfg.jito_tip_handles.get(&slot.config.id) else {
+                    tracing::error!(sender_id = slot.config.id, "no tip handle for Jito sender");
+                    cfg.counters.signing_errors.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                };
+                let tip_lamports = tip_handle.load(Ordering::Relaxed);
+                let Some(tip_account_pk) = tip_account else {
+                    tracing::error!(sender_id = slot.config.id, "no tip account for Jito sender");
+                    cfg.counters.signing_errors.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                };
+                let tipper = solana_sdk::signature::Keypair::new();
+                let rent_exempt = crate::tx_builder::RENT_EXEMPT_MIN_LAMPORTS;
+                let base_fee = crate::tx_builder::BASE_TX_FEE_LAMPORTS;
+                let fund_amount = tip_lamports + rent_exempt + base_fee;
+
+                // Tx2 needs a fresh blockhash distinct from Tx1's nonce-stored hash.
+                let fresh_bh_for_tx2 = cfg.blockhash_cache.current();
+
+                let tx1 = tx_builder::build(tx_builder::BuildParams {
+                    payer: &cfg.keypair,
+                    blockhash: bh,
+                    sender_id: slot.config.id,
+                    trigger_id: trigger_id.0,
+                    tip_account: None,         // Tip is in Tx2 now.
+                    tip_lamports: 0,
+                    nonce: nonce_params,
+                    tx_cfg: &cfg.tx_cfg,
+                    fund_tipper: Some((tipper.pubkey(), fund_amount)),
+                });
+                let tx2 = tx_builder::build_tipper_tx(
+                    &tipper, fresh_bh_for_tx2, tip_account_pk, tip_lamports,
+                    cfg.keypair.pubkey(), rent_exempt,
+                );
+                variants.push(PreSignedTx {
+                    sender_id: slot.config.id,
+                    tx: Arc::new(tx1.tx),
+                    signature: tx1.signature,
+                    blockhash: bh,
+                    prepared_at,
+                    nonce_id,
+                    extra_txs: vec![Arc::new(tx2.tx)],
+                    bundle_metadata: Some(crate::tx_pool::BundleMeta {
+                        tipper_pubkey: tipper.pubkey(),
+                        tip_account: tip_account_pk,
+                        tip_lamports,
+                        tx2_blockhash: fresh_bh_for_tx2,
+                    }),
+                });
+                cfg.counters.variants_signed.fetch_add(1, Ordering::Relaxed);
+            } else {
+                let built = tx_builder::build(tx_builder::BuildParams {
+                    payer: &cfg.keypair,
+                    blockhash: bh,
+                    sender_id: slot.config.id,
+                    trigger_id: trigger_id.0,
+                    tip_account,
+                    tip_lamports: slot.config.tip_lamports,
+                    nonce: nonce_params,
+                    tx_cfg: &cfg.tx_cfg,
+                    fund_tipper: None,
+                });
+                variants.push(PreSignedTx {
+                    sender_id: slot.config.id,
+                    tx: Arc::new(built.tx),
+                    signature: built.signature,
+                    blockhash: bh,
+                    prepared_at,
+                    nonce_id,
+                    extra_txs: vec![],
+                    bundle_metadata: None,
+                });
+                cfg.counters.variants_signed.fetch_add(1, Ordering::Relaxed);
+            }
         }
 
         // Per-trigger deterministic shuffle so no sender_id always wins
@@ -290,6 +352,14 @@ mod tests {
             endpoint_url: "http://x".into(),
             tip_lamports: 1000,
             enabled: true,
+            regions: vec![],
+            outbound_ips: vec![],
+            min_send_interval_ms: 0,
+            use_grpc: false,
+            tip_percentile: 75,
+            tip_floor_lamports: 15_000,
+            tip_ceiling_lamports: 2_000_000,
+            tip_refresh_interval_ms: 30_000,
         }
     }
 

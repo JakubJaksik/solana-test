@@ -189,11 +189,27 @@ pub struct SenderConfig {
     /// vs. caused by something else (errors persist even at low rate).
     #[serde(default)]
     pub min_send_interval_ms: u64,
+
+    // ── Jito bundle sender fields (ignored by other kinds) ──
+    #[serde(default)]
+    pub use_grpc: bool,
+    #[serde(default = "default_tip_percentile")]
+    pub tip_percentile: u32,
+    #[serde(default = "default_tip_floor_lamports")]
+    pub tip_floor_lamports: u64,
+    #[serde(default = "default_tip_ceiling_lamports")]
+    pub tip_ceiling_lamports: u64,
+    #[serde(default = "default_tip_refresh_interval_ms")]
+    pub tip_refresh_interval_ms: u64,
 }
 
 fn default_enabled() -> bool {
     true
 }
+fn default_tip_percentile() -> u32 { 75 }
+fn default_tip_floor_lamports() -> u64 { 15_000 }
+fn default_tip_ceiling_lamports() -> u64 { 2_000_000 }
+fn default_tip_refresh_interval_ms() -> u64 { 30_000 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RunConfig {
@@ -291,6 +307,42 @@ mod tests {
         assert_eq!(s.regions, vec!["frankfurt", "amsterdam", "london", "ny"]);
         assert_eq!(s.outbound_ips, vec!["10.0.0.1", "10.0.0.2"]);
         assert_eq!(s.tip_lamports, 10000);
+    }
+
+    #[test]
+    fn jito_sender_with_full_bundle_fields_parses() {
+        let json = r#"{
+          "id": 2, "name": "jito", "kind": "jito",
+          "endpoint_url": "https://{region}.mainnet.block-engine.jito.wtf",
+          "regions": ["frankfurt", "amsterdam"],
+          "outbound_ips": ["1.2.3.4", "1.2.3.5"],
+          "use_grpc": true,
+          "tip_percentile": 75,
+          "tip_floor_lamports": 20000,
+          "tip_ceiling_lamports": 1500000,
+          "tip_refresh_interval_ms": 30000
+        }"#;
+        let s: SenderConfig = serde_json::from_str(json).unwrap();
+        assert!(s.use_grpc);
+        assert_eq!(s.tip_percentile, 75);
+        assert_eq!(s.tip_floor_lamports, 20_000);
+        assert_eq!(s.tip_ceiling_lamports, 1_500_000);
+        assert_eq!(s.tip_refresh_interval_ms, 30_000);
+    }
+
+    #[test]
+    fn jito_defaults_when_fields_omitted() {
+        let json = r#"{
+          "id": 2, "name": "jito", "kind": "jito",
+          "endpoint_url": "https://{region}.x",
+          "regions": ["frankfurt"]
+        }"#;
+        let s: SenderConfig = serde_json::from_str(json).unwrap();
+        assert!(!s.use_grpc);
+        assert_eq!(s.tip_percentile, 75);
+        assert_eq!(s.tip_floor_lamports, 15_000);
+        assert_eq!(s.tip_ceiling_lamports, 2_000_000);
+        assert_eq!(s.tip_refresh_interval_ms, 30_000);
     }
 
     #[test]

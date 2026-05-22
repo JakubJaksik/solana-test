@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package searcher;
+
+import "bundle.proto";
+
+service SearcherService {
+    rpc SendBundle(SendBundleRequest) returns (SendBundleResponse) {}
+    rpc GetTipAccounts(GetTipAccountsRequest) returns (GetTipAccountsResponse) {}
+}
+
+message SendBundleRequest {
+    bundle.Bundle bundle = 1;
+}
+
+message SendBundleResponse {
+    string uuid = 1;
+}
+
+message GetTipAccountsRequest {}
+
+message GetTipAccountsResponse {
+    repeated string accounts = 1;
+}

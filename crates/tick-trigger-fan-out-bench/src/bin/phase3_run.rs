@@ -59,7 +59,11 @@ use tick_trigger_fan_out_bench::recorder::{
     RegisterEvent, SendEvent,
 };
 use tick_trigger_fan_out_bench::schedule::{Schedule, ScheduleEntry};
-use tick_trigger_fan_out_bench::senders::{helius::HeliusSender, jito::JitoSender, TxSender};
+use tick_trigger_fan_out_bench::senders::{
+    helius::HeliusSender,
+    jito::{tip_updater::JitoTipUpdater, JitoBundleCounters, JitoBundleSender},
+    TxSender,
+};
 use tick_trigger_fan_out_bench::trigger_engine::{
     spawn as spawn_engine, MatchEvent, TriggerEngineConfig, TriggerEngineCounters, TriggerEvent,
 };
@@ -282,6 +286,10 @@ fn main() -> anyhow::Result<()> {
     }
     let mut senders_by_id: std::collections::HashMap<u8, Arc<dyn TxSender>> =
         std::collections::HashMap::new();
+    let mut jito_tip_handles: std::collections::HashMap<u8, Arc<AtomicU64>> =
+        std::collections::HashMap::new();
+    let mut jito_counters_by_id: std::collections::HashMap<u8, JitoBundleCounters> =
+        std::collections::HashMap::new();
     for sc in &enabled_senders {
         let s: Arc<dyn TxSender> = match sc.kind {
             SenderKind::Helius => Arc::new(HeliusSender::new(
@@ -294,14 +302,29 @@ fn main() -> anyhow::Result<()> {
                         sc.name, sc.id
                     );
                 }
-                Arc::new(JitoSender::new(
+                let updater = JitoTipUpdater::new(
+                    sc.tip_percentile,
+                    sc.tip_floor_lamports,
+                    sc.tip_ceiling_lamports,
+                    sc.tip_refresh_interval_ms,
+                );
+                let tip_handle = updater.current_lamports.clone();
+                let _tip_task = updater.spawn(stop.clone());
+                jito_tip_handles.insert(sc.id, tip_handle.clone());
+                let jito_counters = JitoBundleCounters::default();
+                jito_counters_by_id.insert(sc.id, jito_counters.clone());
+                let bundle_sender = JitoBundleSender::new(
                     sc.id,
                     sc.name.clone(),
                     sc.endpoint_url.clone(),
                     sc.regions.clone(),
                     sc.outbound_ips.clone(),
+                    sc.use_grpc,
+                    tip_handle,
                     sc.min_send_interval_ms,
-                ))
+                    jito_counters,
+                )?;
+                Arc::new(bundle_sender) as Arc<dyn TxSender>
             }
         };
         tracing::info!(id = sc.id, name = %s.name(), endpoint = %s.endpoint_url(),
@@ -325,6 +348,7 @@ fn main() -> anyhow::Result<()> {
         nonce_manager: nonce_manager.clone(),
         counters: preparer_counters.clone(),
         stop: stop.clone(),
+        jito_tip_handles: jito_tip_handles.clone(),
     })?;
 
     // Recorder.
@@ -580,6 +604,21 @@ fn main() -> anyhow::Result<()> {
             r.nonce_advanced_local, r.nonce_local_compute_miss);
     }
     println!();
+
+    if !jito_counters_by_id.is_empty() {
+        println!("--- Jito bundle senders ---");
+        for (id, c) in jito_counters_by_id.iter() {
+            let bundles = c.bundles_sent.load(Ordering::Relaxed);
+            let rjs = c.first_reply_json_rpc.load(Ordering::Relaxed);
+            let rgr = c.first_reply_grpc.load(Ordering::Relaxed);
+            println!("Jito[id={}]: bundles_sent={} first_reply: json_rpc={} grpc={}",
+                     id, bundles, rjs, rgr);
+            let ips: Vec<u64> = c.ip_send_count.iter().map(|a| a.load(Ordering::Relaxed)).collect();
+            println!("  per-IP send counts (first 8): {:?}", ips);
+        }
+        println!();
+    }
+
     println!("Records written to : {}", recorder_path.display());
 
     Ok(())
@@ -689,6 +728,7 @@ async fn dispatcher_loop(
                         tip_lamports: sc.tip_lamports,
                         nonce: None,
                         tx_cfg: &tx_cfg,
+                        fund_tipper: None,
                     });
                     v.push(PreSignedTx {
                         sender_id: sc.id,
@@ -697,6 +737,8 @@ async fn dispatcher_loop(
                         blockhash: bh,
                         prepared_at: Instant::now(),
                         nonce_id: None,
+                        extra_txs: vec![],
+                        bundle_metadata: None,
                     });
                 }
                 v
@@ -736,11 +778,22 @@ async fn dispatcher_loop(
 
             let sender_for_task = sender.clone();
             let send_tx_for_task = send_event_tx.clone();
-            let tx_for_task = presigned.tx;
+            let tx_for_task = presigned.tx.clone();
+            let extra_txs_for_task = presigned.extra_txs.clone();
             let trigger_id = trig.trigger_id;
             let sender_id = sender_cfg.id;
             tokio::spawn(async move {
-                let outcome = sender_for_task.send(&tx_for_task).await;
+                let outcome = if extra_txs_for_task.is_empty() {
+                    sender_for_task.send(&tx_for_task).await
+                } else {
+                    let mut bundle: Vec<solana_sdk::transaction::Transaction> =
+                        Vec::with_capacity(1 + extra_txs_for_task.len());
+                    bundle.push((*tx_for_task).clone());
+                    for extra in &extra_txs_for_task {
+                        bundle.push((**extra).clone());
+                    }
+                    sender_for_task.send_bundle(&bundle).await
+                };
                 let _ = send_tx_for_task.try_send(SendEvent {
                     trigger_id,
                     sender_id,

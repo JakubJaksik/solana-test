@@ -8,7 +8,7 @@ description = "Reusable Solana entry observation sources (Yellowstone gRPC + Jit
 build = "build.rs"
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-build = "0.13"
 
 [dependencies]
 tokio.workspace = true

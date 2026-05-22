@@ -7,14 +7,28 @@
 
 use dashmap::DashMap;
 use solana_sdk::hash::Hash;
+use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
 use solana_sdk::transaction::Transaction;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Per-bundle diagnostic info attached to `PreSignedTx`. Populated by the
+/// Jito preparer path; the recorder logs it but it does NOT affect the
+/// hot-path send logic.
+#[derive(Debug, Clone)]
+pub struct BundleMeta {
+    pub tipper_pubkey: Pubkey,
+    pub tip_account: Pubkey,
+    pub tip_lamports: u64,
+    pub tx2_blockhash: Hash,
+}
+
 #[derive(Debug, Clone)]
 pub struct PreSignedTx {
     pub sender_id: u8,
+    /// Tx1 of a bundle, or the single tx for non-bundle senders. Its
+    /// signature is the one tracked in `pending_sigs`.
     pub tx: Arc<Transaction>,
     pub signature: Signature,
     pub blockhash: Hash,
@@ -23,6 +37,12 @@ pub struct PreSignedTx {
     /// `NonceManager`; the dispatcher/recorder uses this to signal the
     /// manager on observed landing. `None` for fresh-blockhash mode.
     pub nonce_id: Option<crate::nonce::manager::NonceId>,
+
+    /// Bundle siblings. Empty `Vec` for non-bundle senders (Helius etc).
+    /// For Jito, contains `[Tx2]` (the tipper transfer).
+    pub extra_txs: Vec<Arc<Transaction>>,
+    /// Diagnostic metadata for bundle sends. `None` for non-bundle senders.
+    pub bundle_metadata: Option<BundleMeta>,
 }
 
 pub struct TxPool {
@@ -82,7 +102,51 @@ mod tests {
             blockhash: Hash::default(),
             prepared_at: Instant::now(),
             nonce_id: None,
+            extra_txs: vec![],
+            bundle_metadata: None,
         }
+    }
+
+    #[test]
+    fn presigned_tx_supports_extra_txs_and_bundle_meta() {
+        let tipper_pk = solana_sdk::pubkey::Pubkey::new_unique();
+        let tip_acc = solana_sdk::pubkey::Pubkey::new_unique();
+        let pre = PreSignedTx {
+            sender_id: 7,
+            tx: Arc::new(Transaction::default()),
+            signature: Signature::default(),
+            blockhash: Hash::default(),
+            prepared_at: Instant::now(),
+            nonce_id: None,
+            extra_txs: vec![Arc::new(Transaction::default())],
+            bundle_metadata: Some(BundleMeta {
+                tipper_pubkey: tipper_pk,
+                tip_account: tip_acc,
+                tip_lamports: 25_000,
+                tx2_blockhash: Hash::default(),
+            }),
+        };
+        assert_eq!(pre.extra_txs.len(), 1);
+        let m = pre.bundle_metadata.unwrap();
+        assert_eq!(m.tip_lamports, 25_000);
+        assert_eq!(m.tipper_pubkey, tipper_pk);
+        assert_eq!(m.tip_account, tip_acc);
+    }
+
+    #[test]
+    fn presigned_tx_default_path_has_empty_extra_txs() {
+        let pre = PreSignedTx {
+            sender_id: 0,
+            tx: Arc::new(Transaction::default()),
+            signature: Signature::default(),
+            blockhash: Hash::default(),
+            prepared_at: Instant::now(),
+            nonce_id: None,
+            extra_txs: vec![],
+            bundle_metadata: None,
+        };
+        assert!(pre.extra_txs.is_empty());
+        assert!(pre.bundle_metadata.is_none());
     }
 
     #[test]
