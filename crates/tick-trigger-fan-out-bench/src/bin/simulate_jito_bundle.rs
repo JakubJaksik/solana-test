@@ -43,6 +43,11 @@ struct Args {
     /// set, uses `cfg.rpc.url` from the config file.
     #[arg(long)]
     rpc_url: Option<String>,
+    /// Commitment for blockhash fetch: processed / confirmed / finalized.
+    /// `processed` is freshest but may not be propagated yet, causing
+    /// BlockhashNotFound on other validators.
+    #[arg(long, default_value = "confirmed")]
+    commitment: String,
 }
 
 fn main() -> Result<()> {
@@ -72,8 +77,14 @@ fn main() -> Result<()> {
         .rpc_url
         .clone()
         .unwrap_or_else(|| cfg.rpc.url.clone());
-    println!("blockhash source: {}", bh_url);
-    let rpc = RpcClient::new_with_commitment(bh_url, CommitmentConfig::processed());
+    println!("blockhash source: {} (commitment={})", bh_url, args.commitment);
+    let commitment = match args.commitment.as_str() {
+        "processed" => CommitmentConfig::processed(),
+        "confirmed" => CommitmentConfig::confirmed(),
+        "finalized" => CommitmentConfig::finalized(),
+        other => anyhow::bail!("invalid commitment: {}", other),
+    };
+    let rpc = RpcClient::new_with_commitment(bh_url, commitment);
     let fresh_bh = rpc.get_latest_blockhash().context("get_latest_blockhash")?;
     println!("fresh blockhash: {}", fresh_bh);
 
@@ -177,19 +188,38 @@ fn main() -> Result<()> {
     // Useful when simulateBundle is unavailable: simulates Tx1 alone.
     // Tx2 alone WILL FAIL pre-sim (tipper has 0 balance) — that's a known
     // limitation of stand-alone tx simulation vs bundle simulation.
-    println!("\n--- Fallback: simulateTransaction for Tx1 (and Tx2 separately) ---");
+    println!("\n--- Fallback: simulateTransaction for Tx1 and Tx2 separately ---");
+    println!("(NOTE: Tx2 in real bundle runs AFTER Tx1 funds tipper, so standalone simulation");
+    println!(" with sigVerify=true and replaceRecentBlockhash=true tells us only about");
+    println!(" *structural* validity, not bundle execution semantics.)");
     for (name, b64) in [("Tx1", &tx1_b64), ("Tx2", &tx2_b64)] {
-        let p = json!({
+        // (1) strict mode: keep blockhash, sigVerify on — same conditions as
+        // leader pre-validation outside of bundle context.
+        let p_strict = json!({
             "jsonrpc":"2.0","id":1,"method":"simulateTransaction",
             "params":[b64, {"encoding":"base64","sigVerify":true,"replaceRecentBlockhash":false}]
         });
         let r = client.post(&rpc_url)
             .header("Content-Type","application/json")
-            .body(p.to_string()).send()?;
+            .body(p_strict.to_string()).send()?;
         let s = r.status();
         let b: Value = r.json().unwrap_or_else(|_| json!({"raw":"<not json>"}));
-        println!("\n[{}] simulateTransaction HTTP {}", name, s);
+        println!("\n[{}] simulateTransaction (strict, keep_blockhash) HTTP {}", name, s);
         println!("{}", serde_json::to_string_pretty(&b)?);
+
+        // (2) replace blockhash + skip sigVerify — isolates structural / account /
+        // balance issues from blockhash freshness.
+        let p_relaxed = json!({
+            "jsonrpc":"2.0","id":1,"method":"simulateTransaction",
+            "params":[b64, {"encoding":"base64","sigVerify":false,"replaceRecentBlockhash":true}]
+        });
+        let r2 = client.post(&rpc_url)
+            .header("Content-Type","application/json")
+            .body(p_relaxed.to_string()).send()?;
+        let s2 = r2.status();
+        let b2: Value = r2.json().unwrap_or_else(|_| json!({"raw":"<not json>"}));
+        println!("\n[{}] simulateTransaction (relaxed, replaceBlockhash=true) HTTP {}", name, s2);
+        println!("{}", serde_json::to_string_pretty(&b2)?);
     }
 
     Ok(())

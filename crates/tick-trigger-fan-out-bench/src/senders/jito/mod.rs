@@ -21,7 +21,6 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use grpc::GrpcMultiIpClient;
 use json_rpc::{JsonRpcMultiIpClient, JsonRpcResponse, SendBundleOptions, SendBundleRequest};
-use solana_sdk::signature::Signature;
 use solana_sdk::transaction::Transaction;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -120,18 +119,11 @@ impl TxSender for JitoBundleSender {
     fn endpoint_url(&self) -> &str { &self.endpoint_template }
     fn protocol(&self) -> &'static str { "JITO_BUNDLE" }
 
-    async fn send(&self, _tx: &Transaction) -> SendOutcome {
-        SendOutcome {
-            send_at: Instant::now(),
-            send_ack_at: None,
-            signature: Signature::default(),
-            http_status: None,
-            rpc_err_code: None,
-            rpc_err_message: None,
-            provider_request_id: None,
-            error: Some("JitoBundleSender requires send_bundle".into()),
-            endpoint_url_used: None,
-        }
+    async fn send(&self, tx: &Transaction) -> SendOutcome {
+        // Wrap as a 1-tx bundle. This is the standard Jito path for the
+        // single-tx mode (tip baked into the same tx as the workload).
+        let txs = [tx.clone()];
+        self.send_bundle(&txs).await
     }
 
     async fn send_bundle(&self, txs: &[Transaction]) -> SendOutcome {
@@ -382,10 +374,23 @@ mod sender_tests {
     }
 
     #[tokio::test]
-    async fn send_single_tx_returns_unsupported_error() {
-        let s = make_sender();
+    async fn send_single_tx_wraps_into_one_tx_bundle() {
+        // No regions, no real network: send_bundle short-circuits with
+        // "no regions configured". send() must reach send_bundle (via
+        // wrapping) and surface the same error — proving it's not
+        // returning the old "requires send_bundle" sentinel.
+        let s = JitoBundleSender::new(
+            7, "jito-test".into(),
+            "https://{region}.x".into(),
+            vec![], // no regions
+            vec!["10.0.0.1".into()],
+            false,
+            Arc::new(AtomicU64::new(50_000)),
+            0,
+            JitoBundleCounters::default(),
+        ).unwrap();
         let tx = Transaction::default();
         let outcome = s.send(&tx).await;
-        assert_eq!(outcome.error.as_deref(), Some("JitoBundleSender requires send_bundle"));
+        assert_eq!(outcome.error.as_deref(), Some("no regions configured"));
     }
 }

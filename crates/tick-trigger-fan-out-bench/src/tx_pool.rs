@@ -18,10 +18,8 @@ use std::time::Instant;
 /// hot-path send logic.
 #[derive(Debug, Clone)]
 pub struct BundleMeta {
-    pub tipper_pubkey: Pubkey,
     pub tip_account: Pubkey,
     pub tip_lamports: u64,
-    pub tx2_blockhash: Hash,
 }
 
 #[derive(Debug, Clone)]
@@ -109,7 +107,6 @@ mod tests {
 
     #[test]
     fn presigned_tx_supports_extra_txs_and_bundle_meta() {
-        let tipper_pk = solana_sdk::pubkey::Pubkey::new_unique();
         let tip_acc = solana_sdk::pubkey::Pubkey::new_unique();
         let pre = PreSignedTx {
             sender_id: 7,
@@ -120,16 +117,13 @@ mod tests {
             nonce_id: None,
             extra_txs: vec![Arc::new(Transaction::default())],
             bundle_metadata: Some(BundleMeta {
-                tipper_pubkey: tipper_pk,
                 tip_account: tip_acc,
                 tip_lamports: 25_000,
-                tx2_blockhash: Hash::default(),
             }),
         };
         assert_eq!(pre.extra_txs.len(), 1);
         let m = pre.bundle_metadata.unwrap();
         assert_eq!(m.tip_lamports, 25_000);
-        assert_eq!(m.tipper_pubkey, tipper_pk);
         assert_eq!(m.tip_account, tip_acc);
     }
 
