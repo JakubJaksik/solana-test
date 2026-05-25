@@ -68,6 +68,13 @@ struct Args {
     /// Amount (lamports) for the "work" transfer ix. Default 1.
     #[arg(long, default_value_t = 1_u64)]
     transfer_lamports: u64,
+    /// Use Jito's `/api/v1/transactions` `sendTransaction` endpoint
+    /// instead of `/api/v1/bundles` `sendBundle`. This is single-tx
+    /// forwarding via Jito's relayer (no bundle auction). Different
+    /// validation pipeline — useful to test whether bundle-specific
+    /// filtering is causing our Invalid status.
+    #[arg(long)]
+    use_send_transaction: bool,
 }
 
 #[tokio::main]
@@ -161,25 +168,44 @@ async fn main() -> Result<()> {
         }
     }
 
-    // POST to Jito.
+    // POST to Jito — choose endpoint based on --use-send-transaction flag.
+    let (endpoint_url, body) = if args.use_send_transaction {
+        // sendTransaction endpoint: /api/v1/transactions, single tx (not array).
+        // Replace /bundles with /transactions in the URL.
+        let tx_url = jito_url.replace("/bundles", "/transactions");
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendTransaction",
+            "params": [b64, { "encoding": "base64", "skipPreflight": true }],
+        });
+        (tx_url, body)
+    } else {
+        // sendBundle endpoint: /api/v1/bundles, array of tx.
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendBundle",
+            "params": [[b64], { "encoding": "base64" }],
+        });
+        (jito_url.clone(), body)
+    };
     println!("\n=== POST to Jito ===");
-    println!("  url: {}", jito_url);
+    println!("  url: {}", endpoint_url);
+    println!(
+        "  method: {}",
+        if args.use_send_transaction { "sendTransaction" } else { "sendBundle" }
+    );
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()?;
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "sendBundle",
-        "params": [[b64], { "encoding": "base64" }],
-    });
     let resp = http
-        .post(&jito_url)
+        .post(&endpoint_url)
         .header("Content-Type", "application/json")
         .body(body.to_string())
         .send()
         .await
-        .context("POST sendBundle")?;
+        .context("POST to Jito")?;
     let status = resp.status();
     let body_text = resp.text().await.unwrap_or_default();
     println!("  http status: {}", status);
@@ -190,13 +216,19 @@ async fn main() -> Result<()> {
         .get("result")
         .and_then(|v| v.as_str())
         .map(String::from);
+    // For sendTransaction, `result` is the tx signature — also useful but not
+    // a bundle_id. We treat it as the ID we'll query for status.
     let bundle_id = match bundle_id {
         Some(b) => {
-            println!("  bundle_id: {}", b);
+            println!(
+                "  {}: {}",
+                if args.use_send_transaction { "tx_signature returned" } else { "bundle_id" },
+                b
+            );
             b
         }
         None => {
-            println!("  no bundle_id returned (Jito rejected at HTTP)");
+            println!("  no result returned (Jito rejected at HTTP)");
             return Ok(());
         }
     };
@@ -221,22 +253,27 @@ async fn main() -> Result<()> {
     let v: serde_json::Value = r.json().await?;
     println!("{}", serde_json::to_string_pretty(&v)?);
 
-    // Jito's view: getInflightBundleStatuses.
-    println!("\n=== Jito getInflightBundleStatuses (Jito's view) ===");
-    let jito_status_body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getInflightBundleStatuses",
-        "params": [[bundle_id]],
-    });
-    let r = http
-        .post(&jito_url)
-        .header("Content-Type", "application/json")
-        .body(jito_status_body.to_string())
-        .send()
-        .await?;
-    let v: serde_json::Value = r.json().await?;
-    println!("{}", serde_json::to_string_pretty(&v)?);
+    // Jito's view: getInflightBundleStatuses (only meaningful for sendBundle).
+    if !args.use_send_transaction {
+        println!("\n=== Jito getInflightBundleStatuses (Jito's view) ===");
+        let jito_status_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getInflightBundleStatuses",
+            "params": [[bundle_id]],
+        });
+        let r = http
+            .post(&jito_url)
+            .header("Content-Type", "application/json")
+            .body(jito_status_body.to_string())
+            .send()
+            .await?;
+        let v: serde_json::Value = r.json().await?;
+        println!("{}", serde_json::to_string_pretty(&v)?);
+    } else {
+        println!("\n=== skipping Jito bundle status (sendTransaction mode) ===");
+        println!("  (the `result` was a tx signature, not a bundle uuid)");
+    }
 
     println!();
     println!("=== interpretation ===");
