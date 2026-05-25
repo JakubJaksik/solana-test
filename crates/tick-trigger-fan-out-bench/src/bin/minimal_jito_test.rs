@@ -4,9 +4,9 @@
 //!   * no auth (anonymous, 1 tps default rate)
 //!   * one tx with tip inlined (no separate tip tx)
 //!   * v0 VersionedTransaction, fresh blockhash, no nonce
-//!   * root domain `mainnet.block-engine.jito.wtf` (Jito routes for us)
+//!   * region-specific HTTP endpoint from config (e.g. frankfurt)
 //!
-//! Sends one bundle, waits 30s, queries BOTH:
+//! Sends one bundle, then polls BOTH:
 //!   * Solana RPC `getSignatureStatuses` — ground truth: tx on chain or not
 //!   * Jito `getInflightBundleStatuses` — Jito's own view
 //!
@@ -29,13 +29,13 @@ use solana_sdk::{
 use solana_system_interface::instruction as system_instruction;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tick_trigger_fan_out_bench::config::{Config, SenderKind};
 use tick_trigger_fan_out_bench::tip_accounts::tip_accounts_for;
 use tick_trigger_fan_out_bench::wallet;
 
 const MEMO_PROGRAM_ID: &str = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
-const JITO_BUNDLES_URL: &str = "https://mainnet.block-engine.jito.wtf/api/v1/bundles";
+const JITO_BUNDLES_URL: &str = "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/bundles";
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Minimal Jito bundle send — no auth, no gRPC, no nonce")]
@@ -48,13 +48,16 @@ struct Args {
     /// Override priority fee microlamports (default from config.tx).
     #[arg(long)]
     priority_fee: Option<u64>,
-    /// How long to wait before querying status, in seconds.
+    /// How long to poll status, in seconds.
     #[arg(long, default_value_t = 30)]
     wait_secs: u64,
     /// Alternative Jito bundles URL (e.g. region-specific). Defaults to
-    /// `https://mainnet.block-engine.jito.wtf/api/v1/bundles`.
+    /// first configured Jito region, else Frankfurt.
     #[arg(long)]
     jito_url: Option<String>,
+    /// Poll interval for Jito inflight status.
+    #[arg(long, default_value_t = 1000)]
+    poll_interval_ms: u64,
     /// Skip the 1-lamport self-transfer ix. Diagnostic for whether Jito
     /// filters bundles whose only "work" is a self-transfer (= test/spam
     /// pattern). With this flag the tx has just [priority_fee, memo, tip].
@@ -89,7 +92,7 @@ async fn main() -> Result<()> {
     let jito_url = args
         .jito_url
         .clone()
-        .unwrap_or_else(|| JITO_BUNDLES_URL.to_string());
+        .unwrap_or_else(|| default_jito_bundles_url(&cfg));
 
     let keypair = wallet::load_keypair(&cfg.wallet.keypair_path).context("load wallet")?;
     let payer_pk = keypair.pubkey();
@@ -240,8 +243,55 @@ async fn main() -> Result<()> {
         }
     };
 
-    println!("\n=== waiting {}s for bundle to land ===", args.wait_secs);
-    tokio::time::sleep(Duration::from_secs(args.wait_secs)).await;
+    if !args.use_send_transaction {
+        println!("\n=== polling Jito inflight status for up to {}s ===", args.wait_secs);
+        let inflight_url = jito_method_url(&jito_url, "getInflightBundleStatuses");
+        println!("  status url: {}", inflight_url);
+        let started = Instant::now();
+        let poll_interval = Duration::from_millis(args.poll_interval_ms.max(100));
+        let mut last_status: Option<serde_json::Value> = None;
+        loop {
+            let v = post_bundle_status(&http, &inflight_url, "getInflightBundleStatuses", &bundle_id)
+                .await?;
+            let status = v
+                .pointer("/result/value/0/status")
+                .and_then(|x| x.as_str())
+                .unwrap_or("unknown");
+            let landed_slot = v
+                .pointer("/result/value/0/landed_slot")
+                .map(|x| x.to_string())
+                .unwrap_or_else(|| "null".to_string());
+            println!(
+                "  t={:>5.1}s inflight status={} landed_slot={}",
+                started.elapsed().as_secs_f64(),
+                status,
+                landed_slot
+            );
+            last_status = Some(v);
+            if matches!(status, "Landed" | "Failed") {
+                break;
+            }
+            if started.elapsed() >= Duration::from_secs(args.wait_secs) {
+                break;
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+
+        if let Some(v) = last_status {
+            println!("\n=== final Jito getInflightBundleStatuses ===");
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        }
+
+        println!("\n=== Jito getBundleStatuses ===");
+        let bundle_status_url = jito_method_url(&jito_url, "getBundleStatuses");
+        println!("  status url: {}", bundle_status_url);
+        let v = post_bundle_status(&http, &bundle_status_url, "getBundleStatuses", &bundle_id)
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&v)?);
+    } else {
+        println!("\n=== waiting {}s for tx to land ===", args.wait_secs);
+        tokio::time::sleep(Duration::from_secs(args.wait_secs)).await;
+    }
 
     // Ground truth: Solana RPC getSignatureStatuses.
     println!("\n=== Solana RPC getSignatureStatuses (GROUND TRUTH) ===");
@@ -260,24 +310,7 @@ async fn main() -> Result<()> {
     let v: serde_json::Value = r.json().await?;
     println!("{}", serde_json::to_string_pretty(&v)?);
 
-    // Jito's view: getInflightBundleStatuses (only meaningful for sendBundle).
-    if !args.use_send_transaction {
-        println!("\n=== Jito getInflightBundleStatuses (Jito's view) ===");
-        let jito_status_body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getInflightBundleStatuses",
-            "params": [[bundle_id]],
-        });
-        let r = http
-            .post(&jito_url)
-            .header("Content-Type", "application/json")
-            .body(jito_status_body.to_string())
-            .send()
-            .await?;
-        let v: serde_json::Value = r.json().await?;
-        println!("{}", serde_json::to_string_pretty(&v)?);
-    } else {
+    if args.use_send_transaction {
         println!("\n=== skipping Jito bundle status (sendTransaction mode) ===");
         println!("  (the `result` was a tx signature, not a bundle uuid)");
     }
@@ -287,7 +320,57 @@ async fn main() -> Result<()> {
     println!(" * getSignatureStatuses null     -> tx never landed on chain");
     println!(" * getSignatureStatuses {{slot, err:null}} -> tx LANDED (bundle worked)");
     println!(" * Jito status Landed            -> Jito processed + landed");
-    println!(" * Jito status Invalid + sig null -> bundle dropped at ingest");
-    println!(" * Jito status Pending + sig null -> auction lost (try higher tip)");
+    println!(" * Jito status Pending           -> still in flight / auction path");
+    println!(" * Jito status Failed            -> all receiving regions marked failed");
+    println!(" * Jito status Invalid           -> not in inflight system now; can be transient early or expired after timeout");
     Ok(())
+}
+
+fn default_jito_bundles_url(cfg: &Config) -> String {
+    cfg.senders
+        .iter()
+        .find(|s| s.kind == SenderKind::Jito && s.enabled && !s.regions.is_empty())
+        .map(|s| s.endpoint_url.replace("{region}", &s.regions[0]))
+        .unwrap_or_else(|| JITO_BUNDLES_URL.to_string())
+}
+
+fn jito_method_url(bundles_url: &str, method: &str) -> String {
+    let (url, query) = bundles_url
+        .split_once('?')
+        .map(|(u, q)| (u, Some(q)))
+        .unwrap_or((bundles_url, None));
+    let method_url = url
+        .strip_suffix("/bundles")
+        .map(|prefix| format!("{prefix}/{method}"))
+        .unwrap_or_else(|| url.to_string());
+    match query {
+        Some(q) => format!("{method_url}?{q}"),
+        None => method_url,
+    }
+}
+
+async fn post_bundle_status(
+    http: &reqwest::Client,
+    url: &str,
+    method: &str,
+    bundle_id: &str,
+) -> Result<serde_json::Value> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": [[bundle_id]],
+    });
+    let resp = http
+        .post(url)
+        .header("Content-Type", "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .with_context(|| format!("POST {method} to Jito"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("parse {method} JSON response: HTTP {status} body={text}"))?;
+    Ok(value)
 }
