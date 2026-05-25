@@ -88,17 +88,48 @@ pub async fn obtain_access_token(
     let signed_bytes = signed.as_ref().to_vec();
     eprintln!("auth: signature ({} bytes)", signed_bytes.len());
 
-    // Step 3: exchange signature for tokens.
+    // Step 3: exchange signature for tokens. Retry up to 3 times because
+    // Envoy in front of Jito's auth service may load-balance requests
+    // across backend instances, and the challenge cache is per-instance.
+    // Each retry has a fresh chance of landing on the instance that issued
+    // our challenge.
     eprintln!("auth: GenerateAuthTokens(...)");
-    let tokens_resp = client
-        .generate_auth_tokens(GenerateAuthTokensRequest {
-            challenge,
-            client_pubkey: pubkey_bytes,
-            signed_challenge: signed_bytes,
-        })
-        .await
-        .context("generate_auth_tokens")?
-        .into_inner();
+    let mut last_err: Option<tonic::Status> = None;
+    let mut tokens_resp = None;
+    for attempt in 1..=3 {
+        let result = client
+            .generate_auth_tokens(GenerateAuthTokensRequest {
+                challenge: challenge.clone(),
+                client_pubkey: pubkey_bytes.clone(),
+                signed_challenge: signed_bytes.clone(),
+            })
+            .await;
+        match result {
+            Ok(r) => {
+                tokens_resp = Some(r.into_inner());
+                break;
+            }
+            Err(s) => {
+                eprintln!(
+                    "auth: GenerateAuthTokens attempt {}/3 failed: {} {}",
+                    attempt,
+                    s.code(),
+                    s.message()
+                );
+                last_err = Some(s);
+                if attempt < 3 {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                }
+            }
+        }
+    }
+    let tokens_resp = match tokens_resp {
+        Some(t) => t,
+        None => {
+            let err = last_err.unwrap();
+            return Err(anyhow::anyhow!("generate_auth_tokens: {}", err));
+        }
+    };
 
     let access_token = tokens_resp
         .access_token
