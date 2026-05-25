@@ -65,6 +65,9 @@ struct Args {
     /// are filtered. Ignored if --no-self-transfer is set.
     #[arg(long)]
     transfer_to: Option<String>,
+    /// Amount (lamports) for the "work" transfer ix. Default 1.
+    #[arg(long, default_value_t = 1_u64)]
+    transfer_lamports: u64,
 }
 
 #[tokio::main]
@@ -116,8 +119,11 @@ async fn main() -> Result<()> {
         } else {
             payer_pk
         };
-        ixs.push(system_instruction::transfer(&payer_pk, &recipient, 1));
-        println!("work ix: transfer 1 lam → {}", recipient);
+        ixs.push(system_instruction::transfer(&payer_pk, &recipient, args.transfer_lamports));
+        println!(
+            "work ix: transfer {} lam → {}",
+            args.transfer_lamports, recipient
+        );
     } else {
         println!("work ix: SKIPPED (--no-self-transfer)");
     }
