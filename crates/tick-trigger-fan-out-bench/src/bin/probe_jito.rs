@@ -50,6 +50,13 @@ struct Args {
     /// `authorization: Bearer <token>` on all SearcherService calls.
     #[arg(long)]
     auth_keypair: Option<PathBuf>,
+    /// Pin all outbound TCP sockets to this local IP. On AWS where NAT
+    /// rotates source EIPs per new TCP connection, this guarantees the
+    /// AuthService challenge + tokens calls + SearcherService calls all
+    /// egress from the same public IP, so they hit the same Jito backend
+    /// instance (with consistent challenge cache).
+    #[arg(long)]
+    local_ip: Option<String>,
 }
 
 #[tokio::main]
@@ -86,13 +93,23 @@ async fn main() -> Result<()> {
 
     let host = format!("{}.mainnet.block-engine.jito.wtf", args.region);
     let endpoint_url = format!("https://{}:443", host);
-    println!("\nconnecting to: {}", endpoint_url);
-    let channel: Channel = Endpoint::from_shared(endpoint_url)?
+    let local_ip: Option<std::net::IpAddr> = args
+        .local_ip
+        .as_ref()
+        .map(|s| s.parse().expect("invalid --local-ip"));
+    if let Some(ip) = local_ip {
+        println!("\nbinding outbound to local IP {}", ip);
+    }
+    println!("connecting to: {}", endpoint_url);
+    let mut ep = Endpoint::from_shared(endpoint_url)?
         .tls_config(ClientTlsConfig::new().domain_name(host.clone()).with_native_roots())?
         .timeout(Duration::from_secs(10))
-        .connect()
-        .await
-        .context("connect to Jito gRPC")?;
+        .tcp_keepalive(Some(Duration::from_secs(30)))
+        .http2_keep_alive_interval(Duration::from_secs(20));
+    if let Some(addr) = local_ip {
+        ep = ep.local_address(Some(addr));
+    }
+    let channel: Channel = ep.connect().await.context("connect to Jito gRPC")?;
 
     let mut client = SearcherServiceClient::new(channel);
 
@@ -108,6 +125,7 @@ async fn main() -> Result<()> {
             &format!("https://{}:443", host_for_auth),
             &host_for_auth,
             &auth_kp,
+            local_ip,
         )
         .await
         .context("obtain Jito access token")?;

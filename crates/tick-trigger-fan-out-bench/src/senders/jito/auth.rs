@@ -19,6 +19,7 @@ use super::proto::auth::{
 use anyhow::{Context, Result};
 use solana_sdk::signature::Keypair;
 use solana_sdk::signer::Signer;
+use std::net::IpAddr;
 use std::time::Duration;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 
@@ -27,15 +28,30 @@ use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 /// metadata on subsequent `SearcherService` requests.
 ///
 /// `endpoint_url` must be the full `https://<host>:443` form.
+///
+/// `local_address` pins the outbound TCP socket to a specific local IP. On
+/// AWS where NAT rotates EIPs per new TCP connection, this is CRITICAL —
+/// without it the two gRPC calls (challenge + tokens) may egress from
+/// different public IPs, hit different backend instances of Jito's auth
+/// service (each with its own challenge cache), and the tokens call returns
+/// "challenge not found".
 pub async fn obtain_access_token(
     endpoint_url: &str,
     host: &str,
     keypair: &Keypair,
+    local_address: Option<IpAddr>,
 ) -> Result<String> {
     let tls = ClientTlsConfig::new().domain_name(host).with_native_roots();
-    let channel: Channel = Endpoint::from_shared(endpoint_url.to_string())?
+    let mut ep = Endpoint::from_shared(endpoint_url.to_string())?
         .tls_config(tls)?
         .timeout(Duration::from_secs(10))
+        .tcp_keepalive(Some(Duration::from_secs(30)))
+        .http2_keep_alive_interval(Duration::from_secs(20));
+    if let Some(addr) = local_address {
+        ep = ep.local_address(Some(addr));
+        eprintln!("auth: bound to local IP {}", addr);
+    }
+    let channel: Channel = ep
         .connect()
         .await
         .with_context(|| format!("connect to Jito AuthService at {endpoint_url}"))?;
@@ -44,26 +60,41 @@ pub async fn obtain_access_token(
 
     // Step 1: generate challenge.
     let pubkey = keypair.pubkey();
+    let pubkey_bytes = pubkey.to_bytes().to_vec();
+    eprintln!(
+        "auth: GenerateAuthChallenge(role=Searcher, pubkey={} [{} bytes])",
+        pubkey,
+        pubkey_bytes.len()
+    );
     let challenge_resp = client
         .generate_auth_challenge(GenerateAuthChallengeRequest {
             role: Role::Searcher as i32,
-            pubkey: pubkey.to_bytes().to_vec(),
+            pubkey: pubkey_bytes.clone(),
         })
         .await
         .context("generate_auth_challenge")?
         .into_inner();
     let challenge = challenge_resp.challenge;
+    eprintln!(
+        "auth: challenge received (len={}): {:?}",
+        challenge.len(),
+        challenge
+    );
 
     // Step 2: sign "{pubkey_base58}-{challenge}".
     let message = format!("{}-{}", pubkey, challenge);
+    eprintln!("auth: signing message (len={}): {:?}", message.len(), message);
     let signed = keypair.sign_message(message.as_bytes());
+    let signed_bytes = signed.as_ref().to_vec();
+    eprintln!("auth: signature ({} bytes)", signed_bytes.len());
 
     // Step 3: exchange signature for tokens.
+    eprintln!("auth: GenerateAuthTokens(...)");
     let tokens_resp = client
         .generate_auth_tokens(GenerateAuthTokensRequest {
             challenge,
-            client_pubkey: pubkey.to_bytes().to_vec(),
-            signed_challenge: signed.as_ref().to_vec(),
+            client_pubkey: pubkey_bytes,
+            signed_challenge: signed_bytes,
         })
         .await
         .context("generate_auth_tokens")?
