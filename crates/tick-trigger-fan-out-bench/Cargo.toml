@@ -44,6 +44,7 @@ solana-client = "3.1"
 solana-commitment-config = "3.1"
 solana-system-interface = "3.2"
 solana-compute-budget-interface = "3.0"
+solana-address-lookup-table-interface = "3.1"
 base64 = "0.22"
 bincode = "1.3"
 # For deriving pubkey from 32-byte seed when loading wallet files that only
@@ -86,3 +87,7 @@ path = "src/bin/minimal_jito_test.rs"
 [[bin]]
 name = "jito_sdk_test"
 path = "src/bin/jito_sdk_test.rs"
+
+[[bin]]
+name = "minimal_jito_swap_test"
+path = "src/bin/minimal_jito_swap_test.rs"

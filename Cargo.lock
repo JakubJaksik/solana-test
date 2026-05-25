@@ -2161,6 +2161,12 @@ dependencies = [
 
 [[package]]
 name = "bs58"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "771fe0050b883fcc3ea2359b1a96bcfbc090b7116eae7c3c512c7a083fdf23d3"
+
+[[package]]
+name = "bs58"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
@@ -3310,7 +3316,7 @@ dependencies = [
  "arrow",
  "arrow-array",
  "arrow-schema",
- "bs58",
+ "bs58 0.5.1",
  "chrono",
  "clap",
  "core_affinity",
@@ -3473,7 +3479,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bincode",
- "bs58",
+ "bs58 0.5.1",
  "chrono",
  "clap",
  "core_affinity",
@@ -4818,6 +4824,25 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "jito-sdk-rust"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af2290b118094c5dfe9a4f72750c6f90be478703f2f819c45e89105f700a3dd5"
+dependencies = [
+ "anyhow",
+ "base64 0.21.7",
+ "bincode",
+ "bs58 0.4.0",
+ "rand 0.8.6",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -7792,7 +7817,7 @@ dependencies = [
  "Inflector",
  "base64 0.22.1",
  "bincode",
- "bs58",
+ "bs58 0.5.1",
  "bv",
  "serde",
  "serde_json",
@@ -7832,7 +7857,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22302265956e8f403cb0721bef0a79137dc1a9a25c95d732d101877629510700"
 dependencies = [
  "base64 0.22.1",
- "bs58",
+ "bs58 0.5.1",
  "serde",
  "serde_json",
  "solana-account",
@@ -8804,7 +8829,7 @@ checksum = "61adccfdcbb8d847813ebf2805bc51d3d05cf51af243d52712bf88e39660c965"
 dependencies = [
  "base64 0.22.1",
  "blake3",
- "bs58",
+ "bs58 0.5.1",
  "bytemuck",
 ]
 
@@ -9509,7 +9534,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bincode",
- "bs58",
+ "bs58 0.5.1",
  "futures",
  "indicatif 0.18.4",
  "log",
@@ -9585,7 +9610,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "727f7cc8e29432b7efad120558a883629332a72c9853f0506b0453a9f11be51a"
 dependencies = [
  "base64 0.22.1",
- "bs58",
+ "bs58 0.5.1",
  "semver 1.0.28",
  "serde",
  "serde_json",
@@ -9794,7 +9819,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f03df7969f5e723ad31b6c9eadccc209037ac4caa34d8dc259316b05c11e82b"
 dependencies = [
  "bincode",
- "bs58",
+ "bs58 0.5.1",
  "serde",
  "solana-account",
  "solana-epoch-info",
@@ -9840,7 +9865,7 @@ version = "3.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8765316242300c48242d84a41614cb3388229ec353ba464f6fe62a733e41806f"
 dependencies = [
- "bs58",
+ "bs58 0.5.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -10093,7 +10118,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4c9166777077aad0805f2658db42e9fe78f2865d8dfb97c464f3f3afca41354"
 dependencies = [
  "bincode",
- "bs58",
+ "bs58 0.5.1",
  "prost 0.11.9",
  "protobuf-src",
  "serde",
@@ -10515,7 +10540,7 @@ dependencies = [
  "base64 0.22.1",
  "bincode",
  "borsh",
- "bs58",
+ "bs58 0.5.1",
  "log",
  "serde",
  "serde_json",
@@ -10555,7 +10580,7 @@ checksum = "cf6050ff0021c138fd522283a743b8a62e39e9710590c17873ec232054dbc03a"
 dependencies = [
  "base64 0.22.1",
  "bincode",
- "bs58",
+ "bs58 0.5.1",
  "serde",
  "serde_json",
  "solana-account-decoder-client-types",
@@ -11344,7 +11369,7 @@ dependencies = [
  "arrow-schema",
  "base64 0.22.1",
  "bincode",
- "bs58",
+ "bs58 0.5.1",
  "chrono",
  "clap",
  "core_affinity",
@@ -11383,7 +11408,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bincode",
- "bs58",
+ "bs58 0.5.1",
  "chrono",
  "clap",
  "core_affinity",
@@ -11393,6 +11418,7 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "entry-sources",
  "humantime",
+ "jito-sdk-rust",
  "parking_lot 0.12.5",
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -11400,6 +11426,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "solana-address-lookup-table-interface",
  "solana-client",
  "solana-commitment-config",
  "solana-compute-budget-interface",
