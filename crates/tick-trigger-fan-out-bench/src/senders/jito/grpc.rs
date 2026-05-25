@@ -5,7 +5,7 @@
 //! returns a cheap clone for one RPC call.
 
 use super::proto::bundle::Bundle;
-use super::proto::packet::Packet;
+use super::proto::packet::{Meta, Packet};
 use super::proto::searcher::searcher_service_client::SearcherServiceClient;
 use super::proto::searcher::SendBundleRequest;
 use std::net::IpAddr;
@@ -94,12 +94,31 @@ impl GrpcMultiIpClient {
         let mut client = SearcherServiceClient::new(channel);
         let packets: Vec<Packet> = packet_bytes
             .iter()
-            .map(|b| Packet { data: b.clone(), meta: None })
+            .map(|b| packet_from_bytes(b.clone()))
             .collect();
         let bundle = Bundle { header: None, packets };
         let req = tonic::Request::new(SendBundleRequest { bundle: Some(bundle) });
         let resp = client.send_bundle(req).await?;
         Ok(resp.into_inner().uuid)
+    }
+}
+
+/// Build a Jito gRPC packet from serialized transaction bytes.
+///
+/// Jito's TS SDK fills packet metadata with the byte length; leaving `meta`
+/// empty can make downstream packet conversion treat the payload as an empty
+/// or malformed packet even though `data` is present.
+pub fn packet_from_bytes(data: Vec<u8>) -> Packet {
+    let size = data.len() as u64;
+    Packet {
+        data,
+        meta: Some(Meta {
+            size,
+            addr: "0.0.0.0".to_string(),
+            port: 0,
+            flags: None,
+            sender_stake: 0,
+        }),
     }
 }
 

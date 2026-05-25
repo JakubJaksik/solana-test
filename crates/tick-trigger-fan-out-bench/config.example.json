@@ -43,6 +43,7 @@
       "tip_lamports": 10000,
       "regions": ["frankfurt", "amsterdam", "london", "ny"],
       "outbound_ips": [],
+      "use_grpc": false,
       "min_send_interval_ms": 0,
       "enabled": true
     }

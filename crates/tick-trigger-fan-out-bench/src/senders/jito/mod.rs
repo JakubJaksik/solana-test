@@ -219,11 +219,13 @@ impl TxSender for JitoBundleSender {
                 let channel = grpc.grid_channel(host_idx, ip_idx);
                 tokio::spawn(async move {
                     use proto::bundle::Bundle as PbBundle;
-                    use proto::packet::Packet as PbPacket;
                     use proto::searcher::searcher_service_client::SearcherServiceClient;
                     use proto::searcher::SendBundleRequest as PbSendBundleRequest;
                     let mut client = SearcherServiceClient::new(channel);
-                    let pb_packets: Vec<PbPacket> = packets.iter().map(|b| PbPacket { data: b.clone(), meta: None }).collect();
+                    let pb_packets = packets
+                        .iter()
+                        .map(|b| crate::senders::jito::grpc::packet_from_bytes(b.clone()))
+                        .collect();
                     let req = tonic::Request::new(PbSendBundleRequest { bundle: Some(PbBundle { header: None, packets: pb_packets }) });
                     let res = client.send_bundle(req).await;
                     let send_ack_at = Instant::now();
@@ -321,12 +323,11 @@ fn parse_json_rpc_reply(host_url: String, status: u16, body: String, send_ack_at
 #[cfg(test)]
 mod proto_smoke {
     use super::proto::bundle::Bundle;
-    use super::proto::packet::Packet;
     use super::proto::searcher::SendBundleRequest;
 
     #[test]
     fn generated_types_construct() {
-        let pkt = Packet { data: vec![1, 2, 3], meta: None };
+        let pkt = crate::senders::jito::grpc::packet_from_bytes(vec![1, 2, 3]);
         let bundle = Bundle { header: None, packets: vec![pkt] };
         let req = SendBundleRequest { bundle: Some(bundle) };
         assert_eq!(req.bundle.unwrap().packets[0].data, vec![1, 2, 3]);

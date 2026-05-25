@@ -25,7 +25,6 @@ use tick_trigger_fan_out_bench::senders::jito::proto::searcher::{
     NextScheduledLeaderRequest,
 };
 use tick_trigger_fan_out_bench::senders::jito::proto::bundle::{Bundle as PbBundle, BundleResult};
-use tick_trigger_fan_out_bench::senders::jito::proto::packet::Packet as PbPacket;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -168,7 +167,7 @@ async fn main() -> Result<()> {
     println!("subscription open. sending bundle...\n");
 
     let raw_bytes = bincode::serialize(&built.tx).unwrap();
-    let pkt = PbPacket { data: raw_bytes, meta: None };
+    let pkt = tick_trigger_fan_out_bench::senders::jito::grpc::packet_from_bytes(raw_bytes);
     let bundle = PbBundle { header: None, packets: vec![pkt] };
     let send_resp = client
         .send_bundle(req_with_auth(
