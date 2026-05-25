@@ -18,7 +18,6 @@ use base64::Engine as _;
 use clap::Parser;
 use solana_client::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
-use solana_compute_budget_interface::ComputeBudgetInstruction;
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     message::{v0::Message as V0Message, VersionedMessage},
@@ -114,15 +113,14 @@ async fn main() -> Result<()> {
     println!("blockhash: {}", blockhash);
 
     // Build the bundle as a SINGLE v0 transaction with the tip baked in.
-    // Order: priority_fee → memo → self-transfer (1 lam) → tip_transfer.
+    // Order: memo → self-transfer (1 lam) → tip_transfer.
+    // Per Jito docs, only the tip matters for bundle auction — priority fee
+    // (ComputeUnitPrice) does NOT influence bundle ordering. We omit it here
+    // to keep the bundle as minimal/canonical as possible (mirrors the
+    // documented sendBundle example which has just memo + tip transfer).
+    let _ = args.priority_fee; // kept as CLI flag for compat but unused here
     let memo_program = Pubkey::from_str(MEMO_PROGRAM_ID).unwrap();
-    let priority_fee = args
-        .priority_fee
-        .unwrap_or(cfg.tx.priority_fee_microlamports);
-    let mut ixs: Vec<Instruction> = Vec::with_capacity(4);
-    if priority_fee > 0 {
-        ixs.push(ComputeBudgetInstruction::set_compute_unit_price(priority_fee));
-    }
+    let mut ixs: Vec<Instruction> = Vec::with_capacity(3);
     ixs.push(Instruction {
         program_id: memo_program,
         accounts: vec![AccountMeta::new_readonly(payer_pk, true)],
