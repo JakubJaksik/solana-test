@@ -39,11 +39,17 @@ struct Args {
     rpc_url: Option<String>,
     #[arg(long, default_value_t = 60)]
     wait_secs: u64,
-    /// Jito auth identifier (registered public key). Sent as `x-jito-auth`
-    /// metadata on every gRPC request. Required for non-anonymous bundle
-    /// processing and higher rate limits.
+    /// (legacy) Raw value to send as `x-jito-auth` metadata. Almost certainly
+    /// NOT what Jito wants — use `--auth-keypair` instead for the real
+    /// challenge-response gRPC flow.
     #[arg(long)]
     jito_auth: Option<String>,
+    /// Path to the keypair JSON for the pubkey registered with Jito (i.e.
+    /// you sent Jito the corresponding public key). The auth flow signs a
+    /// challenge with this keypair to obtain an access token, then sends
+    /// `authorization: Bearer <token>` on all SearcherService calls.
+    #[arg(long)]
+    auth_keypair: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -89,12 +95,41 @@ async fn main() -> Result<()> {
         .context("connect to Jito gRPC")?;
 
     let mut client = SearcherServiceClient::new(channel);
-    if let Some(auth) = &args.jito_auth {
-        println!("auth: x-jito-auth = {}", auth);
-    }
-    fn req_with_auth<M>(body: M, auth: Option<&String>) -> Request<M> {
+
+    // Resolve auth: prefer challenge-response with --auth-keypair, fall back
+    // to legacy raw x-jito-auth header if --jito-auth provided (almost
+    // certainly won't work but kept as a sanity comparison).
+    let bearer_token: Option<String> = if let Some(kp_path) = &args.auth_keypair {
+        let auth_kp = wallet::load_keypair(kp_path)
+            .with_context(|| format!("load auth keypair {:?}", kp_path))?;
+        println!("auth keypair pubkey: {}", auth_kp.pubkey());
+        let host_for_auth = host.clone();
+        let token = tick_trigger_fan_out_bench::senders::jito::auth::obtain_access_token(
+            &format!("https://{}:443", host_for_auth),
+            &host_for_auth,
+            &auth_kp,
+        )
+        .await
+        .context("obtain Jito access token")?;
+        println!("auth: obtained Bearer token (len={})", token.len());
+        Some(token)
+    } else {
+        None
+    };
+
+    fn req_with_auth<M>(
+        body: M,
+        bearer: Option<&String>,
+        legacy_xauth: Option<&String>,
+    ) -> Request<M> {
         let mut req = Request::new(body);
-        if let Some(a) = auth {
+        if let Some(token) = bearer {
+            let val: tonic::metadata::MetadataValue<_> = format!("Bearer {}", token)
+                .parse()
+                .expect("invalid authorization value");
+            req.metadata_mut().insert("authorization", val);
+        }
+        if let Some(a) = legacy_xauth {
             let val: tonic::metadata::MetadataValue<_> =
                 a.parse().expect("invalid x-jito-auth value");
             req.metadata_mut().insert("x-jito-auth", val);
@@ -106,6 +141,7 @@ async fn main() -> Result<()> {
     let mut stream = client
         .subscribe_bundle_results(req_with_auth(
             SubscribeBundleResultsRequest {},
+            bearer_token.as_ref(),
             args.jito_auth.as_ref(),
         ))
         .await
@@ -119,6 +155,7 @@ async fn main() -> Result<()> {
     let send_resp = client
         .send_bundle(req_with_auth(
             PbSendBundleRequest { bundle: Some(bundle) },
+            bearer_token.as_ref(),
             args.jito_auth.as_ref(),
         ))
         .await
@@ -154,6 +191,7 @@ async fn main() -> Result<()> {
     let next_leader = client
         .get_next_scheduled_leader(req_with_auth(
             NextScheduledLeaderRequest { regions: vec![] },
+            bearer_token.as_ref(),
             args.jito_auth.as_ref(),
         ))
         .await

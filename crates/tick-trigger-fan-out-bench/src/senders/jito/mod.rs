@@ -4,6 +4,7 @@
 //! 8 regional hosts × {JSON-RPC, gRPC} = 16 parallel paths, all bound
 //! to a single rotated source IP per send.
 
+pub mod auth;
 pub mod json_rpc;
 pub mod grpc;
 pub mod tip_updater;
@@ -14,6 +15,7 @@ pub mod proto {
     pub mod shared { tonic::include_proto!("shared"); }
     pub mod bundle { tonic::include_proto!("bundle"); }
     pub mod searcher { tonic::include_proto!("searcher"); }
+    pub mod auth { tonic::include_proto!("auth"); }
 }
 
 use super::{SendOutcome, TxSender};

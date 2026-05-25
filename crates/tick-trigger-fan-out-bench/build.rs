@@ -10,6 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 format!("{}/bundle.proto", proto_dir),
                 format!("{}/packet.proto", proto_dir),
                 format!("{}/shared.proto", proto_dir),
+                format!("{}/auth.proto", proto_dir),
             ],
             &[proto_dir],
         )?;
