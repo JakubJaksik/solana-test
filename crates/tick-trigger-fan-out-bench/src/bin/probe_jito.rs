@@ -39,6 +39,11 @@ struct Args {
     rpc_url: Option<String>,
     #[arg(long, default_value_t = 60)]
     wait_secs: u64,
+    /// Jito auth identifier (registered public key). Sent as `x-jito-auth`
+    /// metadata on every gRPC request. Required for non-anonymous bundle
+    /// processing and higher rate limits.
+    #[arg(long)]
+    jito_auth: Option<String>,
 }
 
 #[tokio::main]
@@ -84,9 +89,25 @@ async fn main() -> Result<()> {
         .context("connect to Jito gRPC")?;
 
     let mut client = SearcherServiceClient::new(channel);
+    if let Some(auth) = &args.jito_auth {
+        println!("auth: x-jito-auth = {}", auth);
+    }
+    fn req_with_auth<M>(body: M, auth: Option<&String>) -> Request<M> {
+        let mut req = Request::new(body);
+        if let Some(a) = auth {
+            let val: tonic::metadata::MetadataValue<_> =
+                a.parse().expect("invalid x-jito-auth value");
+            req.metadata_mut().insert("x-jito-auth", val);
+        }
+        req
+    }
+
     println!("subscribing to SubscribeBundleResults...");
     let mut stream = client
-        .subscribe_bundle_results(Request::new(SubscribeBundleResultsRequest {}))
+        .subscribe_bundle_results(req_with_auth(
+            SubscribeBundleResultsRequest {},
+            args.jito_auth.as_ref(),
+        ))
         .await
         .context("subscribe_bundle_results")?
         .into_inner();
@@ -96,7 +117,10 @@ async fn main() -> Result<()> {
     let pkt = PbPacket { data: raw_bytes, meta: None };
     let bundle = PbBundle { header: None, packets: vec![pkt] };
     let send_resp = client
-        .send_bundle(Request::new(PbSendBundleRequest { bundle: Some(bundle) }))
+        .send_bundle(req_with_auth(
+            PbSendBundleRequest { bundle: Some(bundle) },
+            args.jito_auth.as_ref(),
+        ))
         .await
         .context("send_bundle")?
         .into_inner();
@@ -128,7 +152,10 @@ async fn main() -> Result<()> {
     }
 
     let next_leader = client
-        .get_next_scheduled_leader(Request::new(NextScheduledLeaderRequest { regions: vec![] }))
+        .get_next_scheduled_leader(req_with_auth(
+            NextScheduledLeaderRequest { regions: vec![] },
+            args.jito_auth.as_ref(),
+        ))
         .await
         .ok();
     if let Some(resp) = next_leader {
@@ -144,12 +171,14 @@ async fn main() -> Result<()> {
     let body = json!({
         "jsonrpc":"2.0","id":1,"method":"getInflightBundleStatuses","params":[[bundle_uuid.clone()]]
     });
-    let r = client_http
+    let mut req_http = client_http
         .post("https://mainnet.block-engine.jito.wtf/api/v1/getInflightBundleStatuses")
         .header("Content-Type", "application/json")
-        .body(body.to_string())
-        .send()
-        .await?;
+        .body(body.to_string());
+    if let Some(a) = &args.jito_auth {
+        req_http = req_http.header("x-jito-auth", a.as_str());
+    }
+    let r = req_http.send().await?;
     let v: Value = r.json().await?;
     println!("{}", serde_json::to_string_pretty(&v)?);
 
