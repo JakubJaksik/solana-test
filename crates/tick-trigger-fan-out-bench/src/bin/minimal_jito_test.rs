@@ -55,6 +55,16 @@ struct Args {
     /// `https://mainnet.block-engine.jito.wtf/api/v1/bundles`.
     #[arg(long)]
     jito_url: Option<String>,
+    /// Skip the 1-lamport self-transfer ix. Diagnostic for whether Jito
+    /// filters bundles whose only "work" is a self-transfer (= test/spam
+    /// pattern). With this flag the tx has just [priority_fee, memo, tip].
+    #[arg(long)]
+    no_self_transfer: bool,
+    /// Send the "work" lamport transfer to this recipient pubkey (base58)
+    /// instead of payer (self). Tests whether self-transfers specifically
+    /// are filtered. Ignored if --no-self-transfer is set.
+    #[arg(long)]
+    transfer_to: Option<String>,
 }
 
 #[tokio::main]
@@ -100,7 +110,17 @@ async fn main() -> Result<()> {
         accounts: vec![AccountMeta::new_readonly(payer_pk, true)],
         data: b"minimal_jito_test".to_vec(),
     });
-    ixs.push(system_instruction::transfer(&payer_pk, &payer_pk, 1));
+    if !args.no_self_transfer {
+        let recipient = if let Some(rcpt) = &args.transfer_to {
+            Pubkey::from_str(rcpt).context("parse --transfer-to pubkey")?
+        } else {
+            payer_pk
+        };
+        ixs.push(system_instruction::transfer(&payer_pk, &recipient, 1));
+        println!("work ix: transfer 1 lam → {}", recipient);
+    } else {
+        println!("work ix: SKIPPED (--no-self-transfer)");
+    }
     ixs.push(system_instruction::transfer(
         &payer_pk,
         &tip_account,
