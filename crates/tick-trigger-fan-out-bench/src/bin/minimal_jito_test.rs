@@ -249,14 +249,14 @@ async fn main() -> Result<()> {
         println!("  status url: {}", inflight_url);
         let started = Instant::now();
         let poll_interval = Duration::from_millis(args.poll_interval_ms.max(100));
-        let mut last_status: Option<serde_json::Value> = None;
-        loop {
+        let final_status = loop {
             let v = post_bundle_status(&http, &inflight_url, "getInflightBundleStatuses", &bundle_id)
                 .await?;
             let status = v
                 .pointer("/result/value/0/status")
                 .and_then(|x| x.as_str())
-                .unwrap_or("unknown");
+                .unwrap_or("unknown")
+                .to_string();
             let landed_slot = v
                 .pointer("/result/value/0/landed_slot")
                 .map(|x| x.to_string())
@@ -267,20 +267,17 @@ async fn main() -> Result<()> {
                 status,
                 landed_slot
             );
-            last_status = Some(v);
-            if matches!(status, "Landed" | "Failed") {
-                break;
+            if matches!(status.as_str(), "Landed" | "Failed") {
+                break v;
             }
             if started.elapsed() >= Duration::from_secs(args.wait_secs) {
-                break;
+                break v;
             }
             tokio::time::sleep(poll_interval).await;
-        }
+        };
 
-        if let Some(v) = last_status {
-            println!("\n=== final Jito getInflightBundleStatuses ===");
-            println!("{}", serde_json::to_string_pretty(&v)?);
-        }
+        println!("\n=== final Jito getInflightBundleStatuses ===");
+        println!("{}", serde_json::to_string_pretty(&final_status)?);
 
         println!("\n=== Jito getBundleStatuses ===");
         let bundle_status_url = jito_method_url(&jito_url, "getBundleStatuses");
