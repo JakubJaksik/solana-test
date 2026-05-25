@@ -75,6 +75,11 @@ struct Args {
     /// filtering is causing our Invalid status.
     #[arg(long)]
     use_send_transaction: bool,
+    /// Send as `x-jito-auth: <value>` HTTP header. For pubkey-whitelist
+    /// rate-limit tier (e.g. 2 TPS), pass your registered Jito gRPC auth
+    /// pubkey. Without it the request runs at the anonymous 1 TPS default.
+    #[arg(long)]
+    jito_auth: Option<String>,
 }
 
 #[tokio::main]
@@ -199,13 +204,15 @@ async fn main() -> Result<()> {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()?;
-    let resp = http
+    let mut req = http
         .post(&endpoint_url)
         .header("Content-Type", "application/json")
-        .body(body.to_string())
-        .send()
-        .await
-        .context("POST to Jito")?;
+        .body(body.to_string());
+    if let Some(auth) = &args.jito_auth {
+        println!("  x-jito-auth: {} (whitelist tier)", auth);
+        req = req.header("x-jito-auth", auth.as_str());
+    }
+    let resp = req.send().await.context("POST to Jito")?;
     let status = resp.status();
     let body_text = resp.text().await.unwrap_or_default();
     println!("  http status: {}", status);
