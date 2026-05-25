@@ -171,14 +171,12 @@ async fn main() -> Result<()> {
     let body = json!({
         "jsonrpc":"2.0","id":1,"method":"getInflightBundleStatuses","params":[[bundle_uuid.clone()]]
     });
-    let mut req_http = client_http
+    let r = client_http
         .post("https://mainnet.block-engine.jito.wtf/api/v1/getInflightBundleStatuses")
         .header("Content-Type", "application/json")
-        .body(body.to_string());
-    if let Some(a) = &args.jito_auth {
-        req_http = req_http.header("x-jito-auth", a.as_str());
-    }
-    let r = req_http.send().await?;
+        .body(body.to_string())
+        .send()
+        .await?;
     let v: Value = r.json().await?;
     println!("{}", serde_json::to_string_pretty(&v)?);
 
