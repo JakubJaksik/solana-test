@@ -11396,6 +11396,7 @@ dependencies = [
  "parking_lot 0.12.5",
  "rand 0.9.4",
  "reqwest 0.12.28",
+ "rustls 0.23.38",
  "serde",
  "serde_json",
  "solana-address-lookup-table-interface",

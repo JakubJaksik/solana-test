@@ -79,6 +79,10 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<()> {
+    // rustls 0.23 needs a CryptoProvider explicitly chosen when multiple
+    // backends (aws-lc-rs + ring) are linked in via transitive deps.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let args = Args::parse();
     tracing_subscriber::fmt()
         .with_env_filter(
