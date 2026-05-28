@@ -1,18 +1,18 @@
-//! JSON-RPC multi-IP client for Jito sendBundle.
+//! JSON-RPC multi-IP client for Jito `sendTransaction`.
 //!
-//! Holds 8 hosts × N source IPs = 8N reqwest clients, each bound to a
+//! Holds N hosts × M source IPs = N×M reqwest clients, each bound to a
 //! specific outbound IP. `grid_client(host_idx, ip_idx)` returns a cheap
-//! clone for one POST. The sender orchestrates the 8 parallel calls.
+//! clone for one POST. The sender orchestrates the parallel calls across
+//! regional hosts using one rotated source IP per send.
 
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Duration;
 
-/// Per-host, per-IP grid of `reqwest::Client`s.
 pub struct JsonRpcMultiIpClient {
-    pub hosts: Vec<String>,         // 8 fully-substituted URLs
-    grid: Vec<Vec<reqwest::Client>>, // grid[host_idx][ip_idx]
+    pub hosts: Vec<String>,
+    grid: Vec<Vec<reqwest::Client>>,
     ip_count: usize,
 }
 
@@ -33,7 +33,6 @@ impl JsonRpcMultiIpClient {
     pub fn host_count(&self) -> usize { self.hosts.len() }
     pub fn ip_count(&self) -> usize { self.ip_count }
 
-    /// Cheap clone (Arc internal). Picked by the sender for one POST.
     pub fn grid_client(&self, host_idx: usize, ip_idx: usize) -> reqwest::Client {
         self.grid[host_idx][ip_idx % self.ip_count].clone()
     }
@@ -63,17 +62,21 @@ fn build_clients_for_host(outbound_ips: &[String]) -> Vec<reqwest::Client> {
 }
 
 #[derive(Serialize)]
-pub struct SendBundleRequest<'a> {
+pub struct SendTransactionRequest<'a> {
     pub jsonrpc: &'static str,
     pub id: u64,
     pub method: &'static str,
-    /// Jito spec: `params` is `[[tx_b64, ...], { "encoding": "base64" }]`.
-    pub params: (Vec<&'a str>, SendBundleOptions),
+    /// Jito spec: `params` is `[<base64_tx>, { ...options }]`.
+    pub params: (&'a str, SendTransactionOptions),
 }
 
 #[derive(Serialize)]
-pub struct SendBundleOptions {
+pub struct SendTransactionOptions {
     pub encoding: &'static str,
+    #[serde(rename = "skipPreflight")]
+    pub skip_preflight: bool,
+    #[serde(rename = "maxRetries")]
+    pub max_retries: u64,
 }
 
 #[derive(Deserialize)]
@@ -95,15 +98,17 @@ mod tests {
     #[test]
     fn matrix_substitutes_regions_correctly() {
         let c = JsonRpcMultiIpClient::new(
-            "https://{region}.mainnet.block-engine.jito.wtf",
+            "https://{region}.mainnet.block-engine.jito.wtf/api/v1/transactions",
             &["frankfurt".into(), "amsterdam".into(), "dublin".into(),
               "london".into(), "ny".into(), "tokyo".into(),
               "slc".into(), "singapore".into()],
             &[],
         );
         assert_eq!(c.host_count(), 8);
-        assert_eq!(c.hosts[0], "https://frankfurt.mainnet.block-engine.jito.wtf");
-        assert_eq!(c.hosts[7], "https://singapore.mainnet.block-engine.jito.wtf");
+        assert_eq!(
+            c.hosts[0],
+            "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/transactions"
+        );
     }
 
     #[test]
@@ -127,17 +132,25 @@ mod tests {
     }
 
     #[test]
-    fn send_bundle_request_serializes_per_jito_spec() {
-        let req = SendBundleRequest {
+    fn send_transaction_request_serializes_per_jito_spec() {
+        let req = SendTransactionRequest {
             jsonrpc: "2.0",
             id: 1,
-            method: "sendBundle",
-            params: (vec!["TX1_B64", "TX2_B64"], SendBundleOptions { encoding: "base64" }),
+            method: "sendTransaction",
+            params: (
+                "TX_B64",
+                SendTransactionOptions {
+                    encoding: "base64",
+                    skip_preflight: true,
+                    max_retries: 0,
+                },
+            ),
         };
         let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["method"], "sendBundle");
-        assert_eq!(json["params"][0][0], "TX1_B64");
-        assert_eq!(json["params"][0][1], "TX2_B64");
+        assert_eq!(json["method"], "sendTransaction");
+        assert_eq!(json["params"][0], "TX_B64");
         assert_eq!(json["params"][1]["encoding"], "base64");
+        assert_eq!(json["params"][1]["skipPreflight"], true);
+        assert_eq!(json["params"][1]["maxRetries"], 0);
     }
 }

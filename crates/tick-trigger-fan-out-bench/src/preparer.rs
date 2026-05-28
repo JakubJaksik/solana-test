@@ -272,7 +272,6 @@ fn run_loop(cfg: PreparerConfig) {
                 blockhash: bh,
                 prepared_at,
                 nonce_id,
-                extra_txs: vec![],
                 bundle_metadata,
             });
             cfg.counters.variants_signed.fetch_add(1, Ordering::Relaxed);
@@ -335,7 +334,6 @@ mod tests {
             regions: vec![],
             outbound_ips: vec![],
             min_send_interval_ms: 0,
-            use_grpc: false,
             tip_percentile: 75,
             tip_floor_lamports: 15_000,
             tip_ceiling_lamports: 2_000_000,

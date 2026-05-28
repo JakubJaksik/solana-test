@@ -39,11 +39,10 @@
       "id": 2,
       "name": "jito-multi",
       "kind": "jito",
-      "endpoint_url": "https://{region}.mainnet.block-engine.jito.wtf/api/v1/bundles",
+      "endpoint_url": "https://{region}.mainnet.block-engine.jito.wtf/api/v1/transactions",
       "tip_lamports": 10000,
       "regions": ["frankfurt", "amsterdam", "london", "ny"],
       "outbound_ips": [],
-      "use_grpc": false,
       "min_send_interval_ms": 0,
       "enabled": true
     }

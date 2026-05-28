@@ -326,21 +326,16 @@ fn main() -> anyhow::Result<()> {
                 jito_tip_handles.insert(sc.id, tip_handle.clone());
                 let jito_counters = JitoBundleCounters::default();
                 jito_counters_by_id.insert(sc.id, jito_counters.clone());
-                // gRPC Endpoint::connect_lazy needs a tokio context, even for
-                // lazy connect. Build the sender on the bg runtime.
-                let bundle_sender = bg_handle.block_on(async {
-                    JitoBundleSender::new(
+                let bundle_sender = JitoBundleSender::new(
                     sc.id,
                     sc.name.clone(),
                     sc.endpoint_url.clone(),
                     sc.regions.clone(),
                     sc.outbound_ips.clone(),
-                    sc.use_grpc,
                     tip_handle,
                     sc.min_send_interval_ms,
                     jito_counters,
-                )
-                })?;
+                );
                 Arc::new(bundle_sender) as Arc<dyn TxSender>
             }
         };
@@ -623,13 +618,11 @@ fn main() -> anyhow::Result<()> {
     println!();
 
     if !jito_counters_by_id.is_empty() {
-        println!("--- Jito bundle senders ---");
+        println!("--- Jito senders ---");
         for (id, c) in jito_counters_by_id.iter() {
-            let bundles = c.bundles_sent.load(Ordering::Relaxed);
+            let txs = c.txs_sent.load(Ordering::Relaxed);
             let rjs = c.first_reply_json_rpc.load(Ordering::Relaxed);
-            let rgr = c.first_reply_grpc.load(Ordering::Relaxed);
-            println!("Jito[id={}]: bundles_sent={} first_reply: json_rpc={} grpc={}",
-                     id, bundles, rjs, rgr);
+            println!("Jito[id={}]: txs_sent={} first_reply_json_rpc={}", id, txs, rjs);
             let ips: Vec<u64> = c.ip_send_count.iter().map(|a| a.load(Ordering::Relaxed)).collect();
             println!("  per-IP send counts (first 8): {:?}", ips);
         }
@@ -754,7 +747,6 @@ async fn dispatcher_loop(
                         blockhash: bh,
                         prepared_at: Instant::now(),
                         nonce_id: None,
-                        extra_txs: vec![],
                         bundle_metadata: None,
                     });
                 }
@@ -796,21 +788,10 @@ async fn dispatcher_loop(
             let sender_for_task = sender.clone();
             let send_tx_for_task = send_event_tx.clone();
             let tx_for_task = presigned.tx.clone();
-            let extra_txs_for_task = presigned.extra_txs.clone();
             let trigger_id = trig.trigger_id;
             let sender_id = sender_cfg.id;
             tokio::spawn(async move {
-                let outcome = if extra_txs_for_task.is_empty() {
-                    sender_for_task.send(&tx_for_task).await
-                } else {
-                    let mut bundle: Vec<solana_sdk::transaction::Transaction> =
-                        Vec::with_capacity(1 + extra_txs_for_task.len());
-                    bundle.push((*tx_for_task).clone());
-                    for extra in &extra_txs_for_task {
-                        bundle.push((**extra).clone());
-                    }
-                    sender_for_task.send_bundle(&bundle).await
-                };
+                let outcome = sender_for_task.send(&tx_for_task).await;
                 let _ = send_tx_for_task.try_send(SendEvent {
                     trigger_id,
                     sender_id,
