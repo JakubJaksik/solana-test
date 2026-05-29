@@ -67,6 +67,8 @@ pub fn tip_accounts_for(kind: SenderKind) -> &'static [Pubkey] {
     match kind {
         SenderKind::Helius => helius_tip_accounts(),
         SenderKind::Jito => jito_tip_accounts(),
+        // Triton (Jet/SWQoS) needs no tip — inclusion is driven by priority fee.
+        SenderKind::Triton => &[],
     }
 }
 
@@ -158,5 +160,10 @@ mod tests {
         for h in helius {
             assert!(!jito.contains(h), "tip account {} present in both lists", h);
         }
+    }
+
+    #[test]
+    fn tip_accounts_for_triton_is_empty() {
+        assert!(tip_accounts_for(SenderKind::Triton).is_empty());
     }
 }

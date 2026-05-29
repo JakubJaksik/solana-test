@@ -62,6 +62,7 @@ use tick_trigger_fan_out_bench::schedule::{Schedule, ScheduleEntry};
 use tick_trigger_fan_out_bench::senders::{
     helius::HeliusSender,
     jito::{tip_updater::JitoTipUpdater, JitoBundleCounters, JitoBundleSender},
+    triton::TritonSender,
     TxSender,
 };
 use tick_trigger_fan_out_bench::trigger_engine::{
@@ -341,6 +342,13 @@ fn main() -> anyhow::Result<()> {
                     jito_counters,
                 );
                 Arc::new(bundle_sender) as Arc<dyn TxSender>
+            }
+            SenderKind::Triton => {
+                let t = TritonSender::new(sc.id, sc.name.clone(), sc.endpoint_url.clone());
+                // Pre-warm the keep-alive connection off the hot path so the
+                // first send doesn't pay TCP+TLS handshake.
+                t.spawn_warmup(&bg_handle);
+                Arc::new(t) as Arc<dyn TxSender>
             }
         };
         tracing::info!(id = sc.id, name = %s.name(), endpoint = %s.endpoint_url(),
@@ -777,7 +785,7 @@ async fn dispatcher_loop(
                 trigger_id: trig.trigger_id,
                 sender_id: sender_cfg.id,
                 sender_name: sender_cfg.name.clone(),
-                endpoint_url: sender_cfg.endpoint_url.clone(),
+                endpoint_url: sender.endpoint_url().to_string(),
                 protocol: sender.protocol().to_string(),
                 signature: sig,
                 slot: trig.slot,

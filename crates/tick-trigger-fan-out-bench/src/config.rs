@@ -155,6 +155,7 @@ fn default_compute_unit_limit() -> u32 {
 pub enum SenderKind {
     Helius,
     Jito,
+    Triton,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -324,6 +325,18 @@ mod tests {
         assert_eq!(s.tip_floor_lamports, 20_000);
         assert_eq!(s.tip_ceiling_lamports, 1_500_000);
         assert_eq!(s.tip_refresh_interval_ms, 30_000);
+    }
+
+    #[test]
+    fn triton_sender_kind_parses_with_defaults() {
+        let json = r#"{
+          "id": 3, "name": "triton-fra", "kind": "triton",
+          "endpoint_url": "https://my-app.mainnet.rpcpool.com/TOKEN"
+        }"#;
+        let s: SenderConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(s.kind, SenderKind::Triton);
+        assert_eq!(s.tip_lamports, 0); // no tip for Triton
+        assert!(s.enabled);
     }
 
     #[test]

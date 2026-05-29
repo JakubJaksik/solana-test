@@ -6,6 +6,7 @@
 
 pub mod helius;
 pub mod jito;
+pub mod triton;
 
 use async_trait::async_trait;
 use solana_sdk::{signature::Signature, transaction::Transaction};
